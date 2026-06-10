@@ -31,7 +31,8 @@ const USER_PROMPT_TEMPLATE = (product: RawProduct, brandName: string) => `
 이미지 URL: ${product.image_url || "없음"}
 정가: ${product.consumer_price}원
 판매가: ${product.sales_price}원
-옵션: ${product.options?.join(", ") || "없음"}
+옵션(각 줄이 독립된 옵션 타입, 쉼표로 구분된 값들은 모두 포함):
+${product.options && product.options.length > 0 ? product.options.map((o, i) => `  옵션${i + 1}: ${o}`).join("\n") : "  없음"}
 상품 설명: ${product.description || "없음"}
 카테고리: ${product.category || "없음"}
 
@@ -40,8 +41,8 @@ const USER_PROMPT_TEMPLATE = (product: RawProduct, brandName: string) => `
   "brand_name": "브랜드명",
   "name": "상품명",
   "image_url": "이미지URL",
-  "option1": null 또는 "옵션1",
-  "option2": null 또는 "옵션2",
+  "option1": null 또는 "옵션1의 모든 값 (레이블 제외, 값만 쉼표 구분 원형 그대로. 예: '색상: L/블루, 핑크' → 'L/블루, 핑크')",
+  "option2": null 또는 "옵션2의 모든 값 (레이블 제외, 값만 쉼표 구분 원형 그대로. 예: '치수: 80, 90, 100' → '80, 90, 100')",
   "consumer_price": 정가숫자,
   "sales_price": 판매가숫자,
   "lowest_price": null 또는 최저가숫자,
@@ -80,6 +81,30 @@ export async function analyzeProduct(
       new URL(parsed.image_url);
     } catch {
       parsed.image_url = "https://via.placeholder.com/400";
+    }
+
+    // hashtags 보정: 빈 배열이면 상품명에서 키워드 추출
+    if (!Array.isArray(parsed.hashtags) || parsed.hashtags.length === 0) {
+      parsed.hashtags = product.name
+        .replace(/[\[\]()]/g, ' ')
+        .split(/\s+/)
+        .filter((w: string) => w.length >= 2)
+        .slice(0, 5);
+      if (parsed.hashtags.length === 0) parsed.hashtags = ['상품'];
+    }
+
+    // option1/2 레이블 접두사 제거 (예: "색상: L/블루" → "L/블루")
+    const LABEL_PREFIX_RE = /^[가-힣a-zA-Z/\s]{1,6}:\s*/;
+    if (typeof parsed.option1 === "string") parsed.option1 = parsed.option1.replace(LABEL_PREFIX_RE, "");
+    if (typeof parsed.option2 === "string") parsed.option2 = parsed.option2.replace(LABEL_PREFIX_RE, "");
+
+    // category_group 보정: 허용 목록에 없는 값 제거, 빈 배열이면 '기타 리빙' 기본값
+    const VALID = CATEGORY_GROUPS as readonly string[];
+    if (Array.isArray(parsed.category_group)) {
+      parsed.category_group = parsed.category_group.filter((v: string) => VALID.includes(v));
+    }
+    if (!Array.isArray(parsed.category_group) || parsed.category_group.length === 0) {
+      parsed.category_group = ['기타 리빙'];
     }
 
     return PartnerProductSchema.parse(parsed);
