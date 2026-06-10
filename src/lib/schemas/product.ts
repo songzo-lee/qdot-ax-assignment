@@ -22,7 +22,7 @@ export const PartnerProductSchema = z.object({
   discount_rate: z.number().min(0).max(100),
   hashtags: z.array(z.string()).min(1).max(10),
   usp: z.string(),
-  category_group: z.enum(CATEGORY_GROUPS),
+  category_group: z.array(z.enum(CATEGORY_GROUPS)).min(1),
 });
 
 export type PartnerProductCreateInput = z.infer<typeof PartnerProductSchema>;
