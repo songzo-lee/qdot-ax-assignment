@@ -24,13 +24,14 @@ const STORES = [
     url: "https://brand.naver.com/kefii",
     crawler: crawlNaverBrandStore,
   },
-  {
-    id: "naver-smart",
-    name: "파이토누트리 스마트스토어",
-    brand_name: "phytonutri",
-    url: "https://smartstore.naver.com/phytonutri",
-    crawler: crawlNaverSmartStore,
-  },
+  // naver-smart: 로컬 환경에서 IP 차단(429)으로 보류
+  // {
+  //   id: "naver-smart",
+  //   name: "파이토누트리 스마트스토어",
+  //   brand_name: "phytonutri",
+  //   url: "https://smartstore.naver.com/phytonutri",
+  //   crawler: crawlNaverSmartStore,
+  // },
   {
     id: "happyland",
     name: "해피랜드몰",
@@ -43,6 +44,7 @@ const STORES = [
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const storeId = searchParams.get("store") ?? "all";
+  const limit = searchParams.get("limit") ? parseInt(searchParams.get("limit")!) : undefined;
 
   const targetStores =
     storeId === "all" ? STORES : STORES.filter((s) => s.id === storeId);
@@ -69,11 +71,13 @@ export async function GET(req: NextRequest) {
                 send({ type: "progress", stage: "crawl", productName })
               );
               console.log(`Raw products found: ${rawProducts.length}`);
+              const limitedProducts = limit ? rawProducts.slice(0, limit) : rawProducts;
 
+              send({ type: "analyze_start", total: limitedProducts.length });
               const analyzed = await analyzeProducts(
-                rawProducts,
+                limitedProducts,
                 store.brand_name,
-                3,
+                10,
                 (productName) =>
                   send({ type: "progress", stage: "analyze", productName })
               );
@@ -119,7 +123,11 @@ export async function GET(req: NextRequest) {
           });
         } finally {
           await closeBrowser();
-          controller.close();
+          try {
+            controller.close();
+          } catch {
+            // 클라이언트가 먼저 연결을 끊은 경우 무시
+          }
         }
       })();
     },
