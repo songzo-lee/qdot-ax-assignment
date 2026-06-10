@@ -25,6 +25,7 @@ interface ProgressState {
 
 type CrawlEvent =
   | { type: "progress"; stage: ProgressState["stage"]; productName: string }
+  | { type: "analyze_start"; total: number }
   | { type: "done"; result: CrawlResponse }
   | { type: "error"; error: string };
 
@@ -34,6 +35,7 @@ export default function Home() {
   const [result, setResult] = useState<CrawlResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<ProgressState | null>(null);
+  const [analyzeCount, setAnalyzeCount] = useState<{ current: number; total: number } | null>(null);
   const [expandedProduct, setExpandedProduct] = useState<string | null>(null);
 
   function handleCrawl() {
@@ -41,6 +43,7 @@ export default function Home() {
     setError(null);
     setResult(null);
     setProgress({ stage: "crawl", productNames: [] });
+    setAnalyzeCount(null);
 
     const eventSource = new EventSource(
       `/api/crawl?store=${encodeURIComponent(selectedStore)}`
@@ -51,6 +54,11 @@ export default function Home() {
       try {
         const data = JSON.parse(event.data) as CrawlEvent;
 
+        if (data.type === "analyze_start") {
+          setAnalyzeCount({ current: 0, total: data.total });
+          return;
+        }
+
         if (data.type === "progress") {
           setProgress((current) => ({
             stage: data.stage,
@@ -59,6 +67,9 @@ export default function Home() {
               ...(current?.productNames ?? []),
             ].slice(0, 5),
           }));
+          if (data.stage === "analyze") {
+            setAnalyzeCount((c) => c ? { ...c, current: c.current + 1 } : null);
+          }
           return;
         }
 
@@ -149,7 +160,11 @@ export default function Home() {
             <div className={styles.spinner} />
             <div>
               <strong>
-                {progress.stage === "crawl" ? "크롤링 중..." : "AI 분석 중..."}
+                {progress.stage === "crawl" ? "크롤링 중..." : (
+                  analyzeCount
+                    ? `AI 분석 중... ${analyzeCount.current}/${analyzeCount.total}`
+                    : "AI 분석 중..."
+                )}
               </strong>
               {progress.productNames.map((productName, index) => (
                 <div key={`${productName}-${index}`}>{productName}</div>
@@ -267,8 +282,8 @@ function ProductCard({
           </div>
         )}
         <div className={styles.hashtags}>
-          {product.hashtags.map((tag) => (
-            <span key={tag} className={styles.hashtag}>
+          {product.hashtags.map((tag, i) => (
+            <span key={`${tag}-${i}`} className={styles.hashtag}>
               #{tag}
             </span>
           ))}
