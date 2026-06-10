@@ -148,3 +148,6 @@ vite.config.ts.timestamp-*
 CLAUDE.md
 *.claude
 dev.log
+
+# 임시 테스트 스크립트
+scripts/
