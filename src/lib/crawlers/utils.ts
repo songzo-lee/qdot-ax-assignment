@@ -1,4 +1,5 @@
-import { chromium, type Browser, type Page } from "playwright";
+import type { Browser, Page } from "playwright";
+import { chromium } from "playwright";
 
 let browserInstance: Browser | null = null;
 
@@ -10,10 +11,13 @@ export async function getBrowser(): Promise<Browser> {
         "--no-sandbox",
         "--disable-setuid-sandbox",
         "--disable-blink-features=AutomationControlled",
+        "--disable-infobars",
+        "--disable-dev-shm-usage",
+        "--disable-extensions",
       ],
     });
   }
-  return browserInstance;
+  return browserInstance!;
 }
 
 export async function closeBrowser(): Promise<void> {
@@ -23,16 +27,26 @@ export async function closeBrowser(): Promise<void> {
   }
 }
 
+const STEALTH_SCRIPT = `
+  Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+`;
+
 export async function getPage(url: string): Promise<{ page: Page; content: string }> {
   const browser = await getBrowser();
   const context = await browser.newContext({
     userAgent:
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     viewport: { width: 1280, height: 800 },
+    locale: "ko-KR",
+    timezoneId: "Asia/Seoul",
+    extraHTTPHeaders: {
+      "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    },
   });
   const page = await context.newPage();
+  await page.addInitScript(STEALTH_SCRIPT);
 
-  await page.goto(url, { waitUntil: "networkidle", timeout: 30000 });
+  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
   const content = await page.content();
 
   return { page, content };
