@@ -263,25 +263,28 @@ async function fetchProductOptions(
           const productPage = await context.newPage();
 
           let capturedOptions: ReturnType<typeof findInObject> = null;
-          productPage.on("response", async (response) => {
-            const url = response.url();
-            if (
-              !url.includes("/channels/") ||
-              !url.includes("/products/") ||
-              !url.includes("withWindow=false")
-            ) return;
-            try {
+          const optionsResponsePromise = productPage
+            .waitForResponse((response) => {
+              const url = response.url();
+              return (
+                url.includes("/channels/") &&
+                url.includes("/products/") &&
+                url.includes("withWindow=false")
+              );
+            })
+            .then(async (response) => {
               const data: unknown = await response.json();
               const found = findInObject(data);
               if (found) capturedOptions = found;
-            } catch { /* ignore */ }
-          });
+            })
+            .catch(() => { /* ignore */ });
 
           await productPage.goto(`${STORE_URL}/products/${product.id}`, {
             waitUntil: "networkidle",
             timeout: 15000,
           }).catch(() => { /* timeout은 무시하고 캡처된 값 사용 */ });
 
+          await optionsResponsePromise;
           return capturedOptions
             ? { ...product, optionCombinations: capturedOptions }
             : product;
