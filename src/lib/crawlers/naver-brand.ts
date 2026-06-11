@@ -5,6 +5,7 @@ import { getBrowser, getPage } from "./utils";
 const STORE_URL = "https://brand.naver.com/kefii";
 const API_BASE_URL = "https://brand.naver.com/n/v2/channels";
 const PRODUCT_BATCH_SIZE = 50;
+const PRODUCT_OPTION_CONCURRENCY = 10;
 
 interface NaverBrandProduct {
   id: number;
@@ -205,7 +206,7 @@ async function fetchProductOptions(
   void channelUid;
 
   const { default: pLimit } = await import("p-limit");
-  const limit = pLimit(3);
+  const limit = pLimit(PRODUCT_OPTION_CONCURRENCY);
 
   type OptionCombination = {
     optionName1?: string;

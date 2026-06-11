@@ -5,6 +5,7 @@ import type { CrawlerAdapter } from "./types";
 
 const API_BASE_URL = "https://brand.naver.com/n/v2/channels";
 const PRODUCT_BATCH_SIZE = 50;
+const PRODUCT_OPTION_CONCURRENCY = 10;
 
 interface NaverBrandProduct {
   id: number;
@@ -38,6 +39,7 @@ async function extractChannelUid(page: Page): Promise<string> {
     throw new Error("Unable to extract channelUid from the brand store page");
   }
 
+  console.log(`[naver-brand] channelUid: ${channelUid}`);
   return channelUid;
 }
 
@@ -116,6 +118,7 @@ async function fetchFallbackProducts(
         fetchCollection("best-products"),
         fetchCollection("new-products"),
       ]);
+      console.log(`[naver-brand] fallback — best: ${bestProductIds.length}, new: ${newProductIds.length}`);
       const productIds = Array.from(
         new Set([...bestProductIds, ...newProductIds])
       );
@@ -157,6 +160,7 @@ async function fetchCategoryProducts(
   storeUrl: string
 ): Promise<NaverBrandProduct[]> {
   const categoryIds = await fetchProductIds(page, channelUid);
+  console.log(`[naver-brand] categories found: ${categoryIds.length}`);
   const productsById = new Map<number, NaverBrandProduct>();
 
   for (const categoryId of categoryIds) {
@@ -181,6 +185,7 @@ async function fetchCategoryProducts(
         return state?.categoryProducts?.simpleProducts ?? [];
       });
 
+      console.log(`[naver-brand] category ${categoryId}: ${products.length} products`);
       for (const product of products) {
         productsById.set(product.id, product);
       }
@@ -194,7 +199,9 @@ async function fetchCategoryProducts(
     }
   }
 
-  return Array.from(productsById.values());
+  const result = Array.from(productsById.values());
+  console.log(`[naver-brand] category crawl total (deduped): ${result.length} products`);
+  return result;
 }
 
 async function fetchProductOptions(
@@ -207,7 +214,7 @@ async function fetchProductOptions(
   void channelUid;
 
   const { default: pLimit } = await import("p-limit");
-  const limit = pLimit(3);
+  const limit = pLimit(PRODUCT_OPTION_CONCURRENCY);
 
   type OptionCombination = {
     optionName1?: string;
@@ -283,6 +290,7 @@ async function fetchProductOptions(
             timeout: 15000,
           }).catch(() => { /* timeout? 臾댁떆?섍퀬 罹≪쿂??媛??ъ슜 */ });
 
+          console.log(`[naver-brand] options for product ${product.id}:`, capturedOptions ? `${(capturedOptions as unknown[]).length} combinations` : 'none');
           return capturedOptions
             ? { ...product, optionCombinations: capturedOptions }
             : product;
@@ -303,9 +311,10 @@ function mapProducts(products: NaverBrandProduct[]): RawProduct[] {
     productsById.set(product.id, product);
   }
 
-  return Array.from(productsById.values())
-    .filter((product) => product.productStatusType === "SALE" && (product.stockQuantity ?? 1) > 0)
-    .map((product) => {
+  const allProducts = Array.from(productsById.values());
+  const saleProducts = allProducts.filter((product) => product.productStatusType === "SALE" && (product.stockQuantity ?? 1) > 0);
+  console.log(`[naver-brand] mapProducts: ${allProducts.length} total → ${saleProducts.length} on sale`);
+  return saleProducts.map((product) => {
       const inStockCombinations = product.optionCombinations?.filter(
         (c) => (c.stockQuantity ?? 1) > 0
       ) ?? [];
