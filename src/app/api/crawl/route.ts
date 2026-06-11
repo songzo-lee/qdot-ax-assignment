@@ -37,6 +37,32 @@ const STORES = [
   },
 ];
 
+async function extractBrandName(url: string): Promise<string> {
+  const hostname = new URL(url).hostname;
+  try {
+    const { default: axios } = await import('axios');
+    const response = await axios.get<string>(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15' },
+      timeout: 10000,
+    });
+    const html: string = response.data;
+    // og:site_name
+    const ogSite = html.match(/<meta[^>]+property=["']og:site_name["'][^>]+content=["']([^"']+)["']/i)?.[1]
+      ?? html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:site_name["']/i)?.[1];
+    if (ogSite?.trim()) return ogSite.trim();
+    // <title> — take text before first separator (| - ::)
+    const title = html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1]?.trim();
+    if (title) {
+      const parts = title.split(/[|\-:：]/);
+      const candidate = parts[parts.length - 1].trim() || parts[0].trim();
+      if (candidate.length >= 2 && candidate.length <= 30) return candidate;
+    }
+  } catch {
+    // fall through to hostname
+  }
+  return hostname;
+}
+
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const storeId = searchParams.get("store") ?? "all";
@@ -173,46 +199,88 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "url is required" }, { status: 400 });
   }
 
-  try {
-    const brandName: string = new URL(url).hostname;
-    const onProgress = (productName: string): void => {
-      console.log(`Crawled product: ${productName}`);
-    };
-    const rawProducts = await crawlUniversal(url, onProgress);
-    const [enriched, analyzed] = await Promise.all([
-      enrichWithLowestPrices(rawProducts),
-      analyzeProducts(rawProducts, brandName),
-    ]);
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      const send = (event: object) => {
+        try {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+        } catch {
+          // client disconnected - ignore
+        }
+      };
 
-    const priceMap = new Map(
-      enriched
-        .filter((p) => p.lowest_price_info)
-        .map((p) => [p.name, p.lowest_price_info!])
-    );
+      void (async () => {
+        try {
+          const brandName = await extractBrandName(url);
+          const rawProducts = await crawlUniversal(url, (productName) =>
+            send({ type: "progress", stage: "crawl", productName })
+          );
 
-    const products = analyzed.map((product) => ({
-      ...product,
-      lowest_price: priceMap.get(product.name)?.price ?? null,
-      lowest_price_source: priceMap.get(product.name)?.platform ?? null,
-      lowest_price_collected_at:
-        priceMap.get(product.name)?.collected_at ?? null,
-    }));
-    const result: CrawlResult = {
-      store: brandName,
-      brand_name: brandName,
-      url,
-      products,
-      raw_count: rawProducts.length,
-      success: true,
-    };
+          send({ type: "lowest_price_start", total: rawProducts.length });
+          send({ type: "analyze_start", total: rawProducts.length });
 
-    return NextResponse.json(result);
-  } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Crawl failed" },
-      { status: 500 }
-    );
-  } finally {
-    await closeBrowser();
-  }
+          const [enriched, analyzed] = await Promise.all([
+            enrichWithLowestPrices(rawProducts),
+            analyzeProducts(rawProducts, brandName, 3, (productName) =>
+              send({ type: "progress", stage: "analyze", productName })
+            ),
+          ]);
+
+          send({ type: "lowest_price_done" });
+
+          const priceMap = new Map(
+            enriched
+              .filter((product) => product.lowest_price_info)
+              .map((product) => [product.name, product.lowest_price_info!])
+          );
+
+          const products = analyzed.map((product) => ({
+            ...product,
+            lowest_price: priceMap.get(product.name)?.price ?? null,
+            lowest_price_source: priceMap.get(product.name)?.platform ?? null,
+            lowest_price_collected_at:
+              priceMap.get(product.name)?.collected_at ?? null,
+          }));
+          const result: CrawlResult = {
+            store: brandName,
+            brand_name: brandName,
+            url,
+            products,
+            raw_count: rawProducts.length,
+            success: true,
+          };
+
+          send({
+            type: "done",
+            result: {
+              timestamp: new Date().toISOString(),
+              total_products: products.length,
+              stores: [result],
+            },
+          });
+        } catch (err) {
+          send({
+            type: "error",
+            error: err instanceof Error ? err.message : "Crawl failed",
+          });
+        } finally {
+          await closeBrowser();
+          try {
+            controller.close();
+          } catch {
+            // client disconnected - ignore
+          }
+        }
+      })();
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    },
+  });
 }

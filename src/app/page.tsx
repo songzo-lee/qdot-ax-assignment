@@ -31,6 +31,44 @@ type CrawlEvent =
   | { type: "done"; result: CrawlResponse }
   | { type: "error"; error: string };
 
+async function consumeCrawlStream(
+  response: Response,
+  onEvent: (event: CrawlEvent) => boolean
+): Promise<void> {
+  if (!response.body) throw new Error("Empty response stream");
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let completed = false;
+
+  while (!completed) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done });
+
+    const messages = buffer.split("\n\n");
+    buffer = messages.pop() ?? "";
+
+    for (const message of messages) {
+      const payload = message
+        .split("\n")
+        .find((line) => line.startsWith("data: "))
+        ?.slice(6);
+      if (!payload) continue;
+
+      completed = onEvent(JSON.parse(payload) as CrawlEvent);
+      if (completed) {
+        await reader.cancel();
+        break;
+      }
+    }
+
+    if (done) break;
+  }
+
+  if (!completed) throw new Error("Crawl stream ended unexpectedly");
+}
+
 export default function Home() {
   const [selectedStore, setSelectedStore] = useState("all");
   const [loading, setLoading] = useState(false);
@@ -39,6 +77,8 @@ export default function Home() {
   const [progress, setProgress] = useState<ProgressState | null>(null);
   const [analyzeCount, setAnalyzeCount] = useState<{ current: number; total: number } | null>(null);
   const [expandedProduct, setExpandedProduct] = useState<string | null>(null);
+  const [mode, setMode] = useState<"store" | "url">("store");
+  const [customUrl, setCustomUrl] = useState("");
 
   function handleCrawl() {
     setLoading(true);
@@ -62,6 +102,10 @@ export default function Home() {
 
         if (data.type === "analyze_start") {
           setAnalyzeCount({ current: 0, total: data.total });
+          setProgress((current) => ({
+            stage: "analyze",
+            productNames: current?.productNames ?? [],
+          }));
           return;
         }
 
@@ -108,6 +152,91 @@ export default function Home() {
     };
   }
 
+  async function handleCrawlUrl() {
+    if (!customUrl.startsWith("http://") && !customUrl.startsWith("https://")) {
+      setError("URL은 http:// 또는 https://로 시작해야 합니다.");
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    setProgress({ stage: "crawl", productNames: [] });
+    setAnalyzeCount(null);
+
+    try {
+      const res = await fetch("/api/crawl", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: customUrl }),
+      });
+
+      if (res.headers.get("content-type")?.includes("text/event-stream")) {
+        await consumeCrawlStream(res, (data) => {
+          if (
+            data.type === "lowest_price_start" ||
+            data.type === "lowest_price_done"
+          ) {
+            return false;
+          }
+
+          if (data.type === "analyze_start") {
+            setAnalyzeCount({ current: 0, total: data.total });
+            setProgress((current) => ({
+              stage: "analyze",
+              productNames: current?.productNames ?? [],
+            }));
+            return false;
+          }
+
+          if (data.type === "progress") {
+            setProgress((current) => ({
+              stage: data.stage,
+              productNames: [
+                data.productName,
+                ...(current?.productNames ?? []),
+              ].slice(0, 5),
+            }));
+            if (data.stage === "analyze") {
+              setAnalyzeCount((count) =>
+                count ? { ...count, current: count.current + 1 } : null
+              );
+            }
+            return false;
+          }
+
+          if (data.type === "done") {
+            setResult(data.result);
+          } else {
+            setError(data.error);
+          }
+          return true;
+        });
+        return;
+      }
+
+      const data: ({ error?: string } & Partial<CrawlResult>) | CrawlResult =
+        await res.json();
+
+      if (!res.ok || (data as { error?: string }).error) {
+        setError((data as { error?: string }).error ?? "크롤링 실패");
+        return;
+      }
+
+      const crawlResult = data as CrawlResult;
+      setResult({
+        timestamp: new Date().toISOString(),
+        total_products: crawlResult.products.length,
+        stores: [crawlResult],
+      });
+    } catch {
+      setError("크롤링 실패");
+    } finally {
+      setProgress(null);
+      setLoading(false);
+    }
+  }
+
   function downloadJson() {
     if (!result) return;
     const allProducts = result.stores.flatMap((s) => s.products);
@@ -135,21 +264,57 @@ export default function Home() {
       </header>
 
       <section className={styles.controls}>
-        <div className={styles.controlRow}>
-          <select
-            value={selectedStore}
-            onChange={(e) => setSelectedStore(e.target.value)}
-            className={styles.select}
-          >
-            {STORES.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.label}
-              </option>
-            ))}
-          </select>
+        <div className={styles.tabs} role="tablist">
           <button
-            onClick={handleCrawl}
+            role="tab"
+            aria-selected={mode === "store"}
+            className={`${styles.tab} ${mode === "store" ? styles.tabActive : ""}`}
+            onClick={() => setMode("store")}
             disabled={loading}
+          >
+            등록 스토어
+          </button>
+          <button
+            role="tab"
+            aria-selected={mode === "url"}
+            className={`${styles.tab} ${mode === "url" ? styles.tabActive : ""}`}
+            onClick={() => setMode("url")}
+            disabled={loading}
+          >
+            URL 직접 입력
+          </button>
+        </div>
+        <div className={styles.controlRow}>
+          {mode === "store" ? (
+            <select
+              value={selectedStore}
+              onChange={(e) => setSelectedStore(e.target.value)}
+              className={styles.select}
+            >
+              {STORES.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.label}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              type="url"
+              value={customUrl}
+              onChange={(e) => setCustomUrl(e.target.value)}
+              placeholder="https://example.com/shop"
+              className={styles.urlInput}
+              disabled={loading}
+            />
+          )}
+          <button
+            onClick={mode === "store" ? handleCrawl : handleCrawlUrl}
+            disabled={
+              loading ||
+              (mode === "url" &&
+                !customUrl.startsWith("http://") &&
+                !customUrl.startsWith("https://"))
+            }
             className={styles.crawlBtn}
           >
             {loading ? "분석 중..." : "크롤링 시작"}
