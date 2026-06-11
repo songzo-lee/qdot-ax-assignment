@@ -59,6 +59,7 @@ export async function analyzeProduct(
     const userPrompt = USER_PROMPT_TEMPLATE(product, brandName);
     const response = await client.chat.completions.create({
       model: "gpt-5.4-nano",
+      response_format: { type: 'json_object' },
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: userPrompt },
@@ -68,7 +69,12 @@ export async function analyzeProduct(
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error("No JSON in response");
 
-    const parsed = JSON.parse(jsonMatch[0]);
+    // LLM이 생성한 JSON에서 흔한 오류 보정
+    const sanitized = jsonMatch[0]
+      .replace(/,\s*([}\]])/g, '$1')   // trailing comma
+      .replace(/[\x00-\x1F]/g, ' '); // control characters
+
+    const parsed = JSON.parse(sanitized);
 
     // 이미지 URL이 없거나 유효하지 않을 경우 원본 데이터 사용
     if (!parsed.image_url || parsed.image_url === "없음") {
@@ -110,6 +116,10 @@ export async function analyzeProduct(
     parsed.lowest_price = null;
     parsed.lowest_price_source = null;
     parsed.lowest_price_collected_at = null;
+
+    if (typeof parsed.discount_rate === "number") {
+      parsed.discount_rate = Math.max(0, Math.min(100, parsed.discount_rate));
+    }
 
     return PartnerProductSchema.parse(parsed);
   } catch (err) {
