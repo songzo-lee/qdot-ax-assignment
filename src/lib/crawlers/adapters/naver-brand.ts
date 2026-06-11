@@ -1,8 +1,8 @@
 import type { Page } from "playwright";
-import type { RawProduct } from "../schemas/product";
-import { getBrowser, getPage } from "./utils";
+import type { RawProduct } from "../../schemas/product";
+import { getBrowser, getPage } from "../utils";
+import type { CrawlerAdapter } from "./types";
 
-const STORE_URL = "https://brand.naver.com/kefii";
 const API_BASE_URL = "https://brand.naver.com/n/v2/channels";
 const PRODUCT_BATCH_SIZE = 50;
 
@@ -153,7 +153,8 @@ async function fetchFallbackProducts(
 
 async function fetchCategoryProducts(
   page: Page,
-  channelUid: string
+  channelUid: string,
+  storeUrl: string
 ): Promise<NaverBrandProduct[]> {
   const categoryIds = await fetchProductIds(page, channelUid);
   const productsById = new Map<number, NaverBrandProduct>();
@@ -163,7 +164,7 @@ async function fetchCategoryProducts(
 
     try {
       ({ page: categoryPage } = await getPage(
-        `${STORE_URL}/category/${categoryId}`
+        `${storeUrl}/category/${categoryId}`
       ));
       await new Promise(r => setTimeout(r, 500 + Math.random() * 1000));
       const products = await categoryPage.evaluate(() => {
@@ -199,7 +200,8 @@ async function fetchCategoryProducts(
 async function fetchProductOptions(
   page: Page,
   channelUid: string,
-  products: NaverBrandProduct[]
+  products: NaverBrandProduct[],
+  storeUrl: string
 ): Promise<NaverBrandProduct[]> {
   void page;
   void channelUid;
@@ -276,10 +278,10 @@ async function fetchProductOptions(
             } catch { /* ignore */ }
           });
 
-          await productPage.goto(`${STORE_URL}/products/${product.id}`, {
+          await productPage.goto(`${storeUrl}/products/${product.id}`, {
             waitUntil: "networkidle",
             timeout: 15000,
-          }).catch(() => { /* timeout은 무시하고 캡처된 값 사용 */ });
+          }).catch(() => { /* timeout? 臾댁떆?섍퀬 罹≪쿂??媛??ъ슜 */ });
 
           return capturedOptions
             ? { ...product, optionCombinations: capturedOptions }
@@ -342,39 +344,49 @@ function mapProducts(products: NaverBrandProduct[]): RawProduct[] {
     });
 }
 
-export async function crawlNaverBrandStore(
-  onProgress?: (productName: string) => void
-): Promise<RawProduct[]> {
-  console.log("[naver-brand] Starting crawl:", STORE_URL);
-  const { page } = await getPage(STORE_URL);
-
-  try {
-    const channelUid = await extractChannelUid(page);
-    let productDetails: NaverBrandProduct[] = [];
+export const naverBrandAdapter = {
+  name: "naver-brand",
+  detect(url) {
+    return url.includes("brand.naver.com");
+  },
+  async crawl(url, onProgress) {
+    const storeUrl = url.replace(/\/$/, "");
+    console.log("[naver-brand] Starting crawl:", storeUrl);
+    const { page } = await getPage(storeUrl);
 
     try {
-      productDetails = await fetchCategoryProducts(page, channelUid);
-    } catch (error) {
-      console.warn("[naver-brand] Category strategy failed:", error);
-    }
+      const channelUid = await extractChannelUid(page);
+      let productDetails: NaverBrandProduct[] = [];
 
-    if (productDetails.length === 0) {
-      console.warn(
-        "[naver-brand] Category pages returned no products, using collection fallback"
+      try {
+        productDetails = await fetchCategoryProducts(page, channelUid, storeUrl);
+      } catch (error) {
+        console.warn("[naver-brand] Category strategy failed:", error);
+      }
+
+      if (productDetails.length === 0) {
+        console.warn(
+          "[naver-brand] Category pages returned no products, using collection fallback"
+        );
+        productDetails = await fetchFallbackProducts(page, channelUid);
+      }
+
+      productDetails = await fetchProductOptions(
+        page,
+        channelUid,
+        productDetails,
+        storeUrl
       );
-      productDetails = await fetchFallbackProducts(page, channelUid);
+      const products = mapProducts(productDetails);
+      products.forEach((product) => onProgress?.(product.name));
+
+      console.log(`[naver-brand] Found ${products.length} products`);
+      return products;
+    } catch (error) {
+      console.error("[naver-brand] Crawl failed:", error);
+      return [];
+    } finally {
+      await page.context().close();
     }
-
-    productDetails = await fetchProductOptions(page, channelUid, productDetails);
-    const products = mapProducts(productDetails);
-    products.forEach((product) => onProgress?.(product.name));
-
-    console.log(`[naver-brand] Found ${products.length} products`);
-    return products;
-  } catch (error) {
-    console.error("[naver-brand] Crawl failed:", error);
-    return [];
-  } finally {
-    await page.context().close();
-  }
-}
+  },
+} satisfies CrawlerAdapter;

@@ -31,7 +31,7 @@ function parseSalesPrice(value: string): number {
 }
 
 function parseConsumerPrice(value: string): number {
-  return parseInt(value.replace(/[^0-9]/g, ""), 10) || 0;
+  return parseSalesPrice(value);
 }
 
 function resolveImageUrl(imageUrl: string): string {
@@ -89,19 +89,34 @@ function parseProductPage(html: string): ParsedPage {
     const product = $(element);
     const goodsNo = product.attr("data-goods-no") || "";
     const name = product.attr("data-goods-nm") || "";
-    const salesPrice = parseSalesPrice(product.attr("data-goods-price") || "0");
+    let salesPrice = parseSalesPrice(product.attr("data-goods-price") || "0");
     const imageUrl = resolveImageUrl(
       product.attr("data-goods-image-src") || ""
     );
     const productContainer = product.closest("li, .goods_prd_item2_box");
-    const originalPriceText = productContainer
-      .find(".org_price, [class*=consumer]")
-      .first()
-      .text()
-      .trim();
-    const consumerPrice = originalPriceText
-      ? parseConsumerPrice(originalPriceText) || salesPrice
-      : salesPrice;
+    // Prefer Happyland-specific original-price elements before generic strike tags.
+    const consumerPriceSelectors = [
+      ".goods_price .org",
+      ".org_price",
+      ".goods_price [class*=consumer]",
+      "[class*=consumer]",
+      ".goods_price del",
+      ".goods_price s",
+      "del",
+      "s",
+    ];
+    let consumerPrice = 0;
+    for (const selector of consumerPriceSelectors) {
+      consumerPrice = parseConsumerPrice(
+        productContainer.find(selector).first().text().trim()
+      );
+      if (consumerPrice) break;
+    }
+    consumerPrice ||= salesPrice;
+
+    if (consumerPrice < salesPrice) {
+      [consumerPrice, salesPrice] = [salesPrice, consumerPrice];
+    }
 
     if (!name || !salesPrice) return;
 

@@ -1,7 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  serverExternalPackages: ["playwright", "cheerio"],
+  serverExternalPackages: ["playwright", "playwright-extra", "puppeteer-extra-plugin-stealth", "cheerio"],
   turbopack: {
     root: __dirname,
   },

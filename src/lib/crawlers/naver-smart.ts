@@ -1,7 +1,13 @@
 import axios from "axios";
 import type { Page } from "playwright";
 import type { RawProduct } from "../schemas/product";
-import { getBrowser, getPage, normalizeImageUrl, parsePrice } from "./utils";
+import {
+  getBrowser,
+  getPage,
+  normalizeImageUrl,
+  parsePrice,
+  STEALTH_SCRIPT,
+} from "./utils";
 
 const STORE_URL = "https://smartstore.naver.com/phytonutri";
 const STORE_ID = "phytonutri";
@@ -282,10 +288,8 @@ async function crawlWithPlaywright(): Promise<RawProduct[] | null> {
       "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
     },
   });
+  await context.addInitScript(STEALTH_SCRIPT);
   const page = await context.newPage();
-  await page.addInitScript(`
-    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-  `);
   const capturedProducts = new Map<number, NaverSmartProduct>();
 
   try {
