@@ -21,7 +21,7 @@ const SYSTEM_PROMPT = `당신은 이커머스 상품 데이터를 분석하여 �
 
 hashtags는 상품의 핵심 키워드를 #없이 3-7개 추출하세요.
 usp는 상품의 핵심 차별점을 한 문장으로 작성하세요 (최대 100자).
-discount_rate는 (consumer_price - sales_price) / consumer_price * 100으로 계산하세요.`;
+discount_rate는 입력에 discount_rate 값이 제공된 경우 그 값을 그대로 사용하고, 없으면 (consumer_price - sales_price) / consumer_price * 100으로 계산하세요.`;
 
 const USER_PROMPT_TEMPLATE = (product: RawProduct, brandName: string) => `
 다음 상품 정보를 큐닷 파트너 상품 제안서 형식으로 변환해주세요:
@@ -31,7 +31,7 @@ const USER_PROMPT_TEMPLATE = (product: RawProduct, brandName: string) => `
 이미지 URL: ${product.image_url || "없음"}
 정가: ${product.consumer_price}원
 판매가: ${product.sales_price}원
-옵션(각 줄이 독립된 옵션 타입, 쉼표로 구분된 값들은 모두 포함):
+${product.discount_rate !== undefined ? `할인율: ${product.discount_rate}%\n` : ""}옵션(각 줄이 독립된 옵션 타입, 쉼표로 구분된 값들은 모두 포함):
 ${product.options && product.options.length > 0 ? product.options.map((o, i) => `  옵션${i + 1}: ${o}`).join("\n") : "  없음"}
 상품 설명: ${product.description || "없음"}
 카테고리: ${product.category || "없음"}
@@ -45,7 +45,6 @@ ${product.options && product.options.length > 0 ? product.options.map((o, i) => 
   "option2": null 또는 "옵션2의 모든 값 (레이블 제외, 값만 쉼표 구분 원형 그대로. 예: '치수: 80, 90, 100' → '80, 90, 100')",
   "consumer_price": 정가숫자,
   "sales_price": 판매가숫자,
-  "lowest_price": null 또는 최저가숫자,
   "discount_rate": 할인율숫자,
   "hashtags": ["태그1", "태그2", ...],
   "usp": "핵심 차별점",
@@ -106,6 +105,11 @@ export async function analyzeProduct(
     if (!Array.isArray(parsed.category_group) || parsed.category_group.length === 0) {
       parsed.category_group = ['기타 리빙'];
     }
+
+    // 최저가는 크롤링으로 채움 — AI가 알 수 없으므로 null 고정
+    parsed.lowest_price = null;
+    parsed.lowest_price_source = null;
+    parsed.lowest_price_collected_at = null;
 
     return PartnerProductSchema.parse(parsed);
   } catch (err) {
