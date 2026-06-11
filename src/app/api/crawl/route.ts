@@ -105,7 +105,9 @@ export async function GET(req: NextRequest) {
               send({ type: "analyze_start", total: limitedProducts.length });
 
               const [enriched, analyzed] = await Promise.all([
-                enrichWithLowestPrices(limitedProducts),
+                Promise.resolve<
+                  Awaited<ReturnType<typeof enrichWithLowestPrices>>
+                >([]),
                 analyzeProducts(
                   limitedProducts,
                   store.brand_name,
@@ -221,7 +223,9 @@ export async function POST(req: NextRequest) {
           send({ type: "analyze_start", total: rawProducts.length });
 
           const [enriched, analyzed] = await Promise.all([
-            enrichWithLowestPrices(rawProducts),
+            Promise.resolve<
+              Awaited<ReturnType<typeof enrichWithLowestPrices>>
+            >([]),
             analyzeProducts(rawProducts, brandName, 3, (productName) =>
               send({ type: "progress", stage: "analyze", productName })
             ),
