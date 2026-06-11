@@ -7,10 +7,12 @@ import { godomallAdapter } from './adapters/godomall';
 import { naverBrandAdapter } from './adapters/naver-brand';
 import { naverSmartAdapter } from './adapters/naver-smart';
 import type { CrawlerAdapter } from './adapters/types';
+import { happylandAdapter } from './happyland';
 
 const ADAPTERS: CrawlerAdapter[] = [
   naverBrandAdapter,
   naverSmartAdapter,
+  happylandAdapter,
   godomallAdapter,
   firstmallAdapter,
   cafe24Adapter,

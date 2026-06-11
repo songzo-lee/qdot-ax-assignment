@@ -1,6 +1,7 @@
 import axios from "axios";
 import * as cheerio from "cheerio";
 import type { RawProduct } from "../schemas/product";
+import type { CrawlerAdapter } from "./adapters/types";
 
 const BASE_URL = "https://m.happylandmall.com";
 const STORE_URL = `${BASE_URL}/`;
@@ -8,7 +9,7 @@ const PRODUCT_LIST_URL = `${BASE_URL}/goods/goods_list.php?cateCd=014008`;
 const PRODUCT_LIST_AJAX_URL = `${BASE_URL}/goods/goods_list_ajax.php`;
 const PRODUCT_DETAIL_URL = `${BASE_URL}/goods/goods_view.php`;
 const PAGE_SIZE = 200;
-const DETAIL_CONCURRENCY = 10;
+const DETAIL_CONCURRENCY = 5;
 const USER_AGENT =
   "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1";
 const REQUEST_HEADERS = {
@@ -420,3 +421,16 @@ export async function crawlHappyland(
     return [];
   }
 }
+
+export const happylandAdapter = {
+  name: "happyland",
+  detect(url: string): boolean {
+    return url.includes("happylandmall.com");
+  },
+  crawl(
+    _url: string,
+    onProgress?: (productName: string) => void
+  ): Promise<RawProduct[]> {
+    return crawlHappyland(onProgress);
+  },
+} satisfies CrawlerAdapter;
