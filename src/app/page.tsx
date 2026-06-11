@@ -25,6 +25,8 @@ interface ProgressState {
 
 type CrawlEvent =
   | { type: "progress"; stage: ProgressState["stage"]; productName: string }
+  | { type: "lowest_price_start"; total: number }
+  | { type: "lowest_price_done" }
   | { type: "analyze_start"; total: number }
   | { type: "done"; result: CrawlResponse }
   | { type: "error"; error: string };
@@ -53,6 +55,10 @@ export default function Home() {
     eventSource.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data) as CrawlEvent;
+
+        if (data.type === "lowest_price_start" || data.type === "lowest_price_done") {
+          return;
+        }
 
         if (data.type === "analyze_start") {
           setAnalyzeCount({ current: 0, total: data.total });
