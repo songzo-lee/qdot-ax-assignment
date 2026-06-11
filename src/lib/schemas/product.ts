@@ -19,6 +19,8 @@ export const PartnerProductSchema = z.object({
   consumer_price: z.number().positive(),
   sales_price: z.number().positive(),
   lowest_price: z.number().positive().nullable(),
+  lowest_price_source: z.string().nullable(),
+  lowest_price_collected_at: z.string().nullable(),
   discount_rate: z.number().min(0).max(100),
   hashtags: z.array(z.string()).min(1).max(10),
   usp: z.string(),
@@ -32,6 +34,7 @@ export interface RawProduct {
   image_url: string;
   consumer_price: number;
   sales_price: number;
+  discount_rate?: number;
   options?: string[];
   description?: string;
   category?: string;
