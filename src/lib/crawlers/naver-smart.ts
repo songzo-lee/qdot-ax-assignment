@@ -9,8 +9,6 @@ import {
   STEALTH_SCRIPT,
 } from "./utils";
 
-const STORE_URL = "https://smartstore.naver.com/phytonutri";
-const STORE_ID = "phytonutri";
 const API_BASE_URL = "https://smartstore.naver.com/i/v2/channels";
 const CATEGORY_API_BASE_URLS = [
   API_BASE_URL,
@@ -188,7 +186,8 @@ async function fetchCategoryIdsWithPage(
 
 async function fetchCategoryProductsWithPage(
   page: Page,
-  channelUid: string
+  channelUid: string,
+  storeId: string
 ): Promise<NaverSmartProduct[]> {
   const categoryIds = await fetchCategoryIdsWithPage(page, channelUid);
   const productsById = new Map<number, NaverSmartProduct>();
@@ -198,7 +197,7 @@ async function fetchCategoryProductsWithPage(
 
     try {
       ({ page: categoryPage } = await getPage(
-        `https://smartstore.naver.com/${STORE_ID}/category/${categoryId}`
+        `https://smartstore.naver.com/${storeId}/category/${categoryId}`
       ));
       await categoryPage
         .waitForFunction(
@@ -276,7 +275,7 @@ async function fetchProductsWithPage(
   );
 }
 
-async function crawlWithPlaywright(): Promise<RawProduct[] | null> {
+async function crawlWithPlaywright(storeUrl: string): Promise<RawProduct[] | null> {
   const browser = await getBrowser();
   const context = await browser.newContext({
     userAgent:
@@ -328,7 +327,7 @@ async function crawlWithPlaywright(): Promise<RawProduct[] | null> {
       }
     });
 
-    await page.goto(STORE_URL, { waitUntil: "networkidle", timeout: 30000 });
+    await page.goto(storeUrl, { waitUntil: "networkidle", timeout: 30000 });
 
     try {
       const categoryTabs = await page
@@ -353,7 +352,7 @@ async function crawlWithPlaywright(): Promise<RawProduct[] | null> {
   return mapProducts(Array.from(capturedProducts.values()));
 }
 
-async function fetchChannelUidWithAxios(): Promise<string | null> {
+async function fetchChannelUidWithAxios(storeUrl: string): Promise<string | null> {
   const failures: string[] = [];
 
   for (const userAgent of USER_AGENTS) {
@@ -366,10 +365,10 @@ async function fetchChannelUidWithAxios(): Promise<string | null> {
         Accept:
           "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-        Referer: STORE_URL,
+        Referer: storeUrl,
         "User-Agent": userAgent,
       };
-      const response = await axios.get<string>(STORE_URL, {
+      const response = await axios.get<string>(storeUrl, {
         headers,
         timeout: 30000,
       });
@@ -391,11 +390,14 @@ async function fetchChannelUidWithAxios(): Promise<string | null> {
   return null;
 }
 
-async function fetchProductIdsWithAxios(channelUid: string): Promise<number[]> {
+async function fetchProductIdsWithAxios(
+  channelUid: string,
+  storeUrl: string
+): Promise<number[]> {
   const headers = {
     Accept: "application/json, text/plain, */*",
     "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-    Referer: STORE_URL,
+    Referer: storeUrl,
     "User-Agent": USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)],
   };
   const [bestResponse, newResponse] = await Promise.all([
@@ -416,13 +418,14 @@ async function fetchProductIdsWithAxios(channelUid: string): Promise<number[]> {
 
 async function fetchProductsWithAxios(
   channelUid: string,
-  productIds: number[]
+  productIds: number[],
+  storeUrl: string
 ): Promise<NaverSmartProduct[]> {
   const products: NaverSmartProduct[] = [];
   const headers = {
     Accept: "application/json, text/plain, */*",
     "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-    Referer: STORE_URL,
+    Referer: storeUrl,
     "User-Agent": USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)],
   };
 
@@ -447,15 +450,15 @@ async function fetchProductsWithAxios(
   return products;
 }
 
-async function crawlWithAxios(): Promise<RawProduct[]> {
-  const channelUid = await fetchChannelUidWithAxios();
+async function crawlWithAxios(storeUrl: string): Promise<RawProduct[]> {
+  const channelUid = await fetchChannelUidWithAxios(storeUrl);
   if (!channelUid) {
     return [];
   }
 
   try {
-    const productIds = await fetchProductIdsWithAxios(channelUid);
-    const products = await fetchProductsWithAxios(channelUid, productIds);
+    const productIds = await fetchProductIdsWithAxios(channelUid, storeUrl);
+    const products = await fetchProductsWithAxios(channelUid, productIds, storeUrl);
     return mapProducts(products);
   } catch (error) {
     console.warn("[naver-smart] Axios fallback API request failed:", error);
@@ -464,12 +467,17 @@ async function crawlWithAxios(): Promise<RawProduct[]> {
 }
 
 export async function crawlNaverSmartStore(
+  storeUrl: string,
   onProgress?: (productName: string) => void
 ): Promise<RawProduct[]> {
+  const STORE_URL = storeUrl;
+  const STORE_ID =
+    new URL(storeUrl).pathname.split("/").filter(Boolean)[0] ?? "unknown";
+
   console.log("[naver-smart] Starting crawl:", STORE_URL);
 
   try {
-    const products = await crawlWithPlaywright();
+    const products = await crawlWithPlaywright(STORE_URL);
     if (products !== null && products.length > 0) {
       products.forEach((product) => onProgress?.(product.name));
       console.log(`[naver-smart] Found ${products.length} products with Playwright`);
@@ -480,7 +488,7 @@ export async function crawlNaverSmartStore(
   }
 
   try {
-    const products = await crawlWithAxios();
+    const products = await crawlWithAxios(STORE_URL);
     if (products.length > 0) {
       products.forEach((product) => onProgress?.(product.name));
       console.log(`[naver-smart] Found ${products.length} products with axios`);

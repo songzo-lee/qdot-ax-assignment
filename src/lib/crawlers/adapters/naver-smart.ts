@@ -7,7 +7,6 @@ export const naverSmartAdapter: CrawlerAdapter = {
     return url.includes('smartstore.naver.com');
   },
   crawl(url, onProgress) {
-    void url;
-    return crawlNaverSmartStore(onProgress);
+    return crawlNaverSmartStore(url, onProgress);
   },
 };
