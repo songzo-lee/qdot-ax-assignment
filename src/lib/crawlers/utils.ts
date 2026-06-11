@@ -1,5 +1,8 @@
 import type { Browser, Page } from "playwright";
-import { chromium } from "playwright";
+import { chromium } from "playwright-extra";
+import StealthPlugin from "puppeteer-extra-plugin-stealth";
+
+chromium.use(StealthPlugin());
 
 let browserInstance: Browser | null = null;
 
@@ -27,8 +30,10 @@ export async function closeBrowser(): Promise<void> {
   }
 }
 
-const STEALTH_SCRIPT = `
-  Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+export const STEALTH_SCRIPT = `
+  Object.defineProperty(navigator, 'languages', {
+    get: () => ['ko-KR', 'ko', 'en-US', 'en'],
+  });
 `;
 
 export async function getPage(url: string): Promise<{ page: Page; content: string }> {
@@ -50,16 +55,6 @@ export async function getPage(url: string): Promise<{ page: Page; content: strin
   const content = await page.content();
 
   return { page, content };
-}
-
-export function extractPreloadedState(html: string): Record<string, unknown> | null {
-  try {
-    const match = html.match(/window\.__PRELOADED_STATE__\s*=\s*(\{[\s\S]*?\});\s*<\/script>/);
-    if (match) return JSON.parse(match[1]);
-  } catch {
-    // fall through
-  }
-  return null;
 }
 
 export function normalizeImageUrl(url: string): string {
