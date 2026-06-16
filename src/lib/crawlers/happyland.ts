@@ -1,6 +1,7 @@
 import axios from "axios";
 import * as cheerio from "cheerio";
 import type { RawProduct } from "../schemas/product";
+import { filterSoldOutProducts } from "./sold-out";
 import type { CrawlerAdapter } from "./adapters/types";
 
 const BASE_URL = "https://m.happylandmall.com";
@@ -269,8 +270,11 @@ async function finalizeProducts(
   cookieString: string,
   onProgress?: (productName: string) => void
 ): Promise<RawProduct[]> {
-  reportProducts(products, onProgress);
-  return enrichWithOptions(products, cookieString);
+  const enriched = filterSoldOutProducts(
+    await enrichWithOptions(products, cookieString)
+  );
+  reportProducts(enriched, onProgress);
+  return enriched;
 }
 
 async function crawlHttpPages(

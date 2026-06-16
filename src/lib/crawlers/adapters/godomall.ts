@@ -2,6 +2,7 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import type { Readable } from 'stream';
 import type { RawProduct } from '../../schemas/product';
+import { filterSoldOutProducts } from '../sold-out';
 import type { CrawlerAdapter } from './types';
 
 const PAGE_SIZE = 200;
@@ -477,11 +478,11 @@ export const godomallAdapter = {
       );
     }
 
-    const enrichedProducts = await enrichWithOptions(
+    const enrichedProducts = filterSoldOutProducts(await enrichWithOptions(
       origin,
       dedupeByGoodsNo(listedProducts),
       cookieJar.value,
-    );
+    ));
     for (const product of enrichedProducts) {
       onProgress?.(product.name);
     }
