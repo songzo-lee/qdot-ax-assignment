@@ -2,12 +2,13 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import type { AnyNode } from 'domhandler';
 import type { RawProduct } from '../../schemas/product';
+import { filterSoldOutProducts } from '../sold-out';
 import type { CrawlerAdapter } from './types';
 
 const MAX_PAGES = 100;
 const DETAIL_CONCURRENCY = 10;
 const USER_AGENT =
-  'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1';
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 type ListedProduct = RawProduct & {
   productNo: string;
@@ -37,11 +38,59 @@ function assertNoCafe24Challenge(html: string): void {
   }
 }
 
-function requestHeaders(origin: string): Record<string, string> {
+function requestHeaders(origin: string, hostOverride?: string): Record<string, string> {
   return {
     'User-Agent': USER_AGENT,
     Referer: `${origin}/`,
+    ...(hostOverride ? { Host: hostOverride } : {}),
   };
+}
+
+async function fetchCafe24Html(
+  url: string,
+  origin: string,
+  hostOverride = '',
+  redirectDepth = 0,
+): Promise<string> {
+  if (redirectDepth > 5) {
+    throw new Error(`Too many redirects while fetching Cafe24 page: ${url}`);
+  }
+
+  const currentUrl = new URL(url);
+  const originHost = new URL(origin).hostname;
+  const headers = requestHeaders(origin, hostOverride || undefined);
+
+  const response = await axios.get<string>(currentUrl.href, {
+    headers,
+    timeout: 15000,
+    maxRedirects: 0,
+    adapter: ['http'],
+    validateStatus: (status) => status >= 200 && status < 400,
+  });
+
+  if (response.status >= 300 && response.status < 400) {
+    const location = response.headers.location;
+    if (!location) {
+      return response.data;
+    }
+
+    const redirectedUrl = new URL(location, currentUrl);
+    if (redirectedUrl.hostname !== currentUrl.hostname) {
+      redirectedUrl.hostname = currentUrl.hostname;
+    }
+    if (redirectedUrl.hostname !== originHost) {
+      redirectedUrl.hostname = originHost;
+    }
+    redirectedUrl.protocol = currentUrl.protocol;
+
+    if (!hostOverride && redirectedUrl.hostname !== currentUrl.hostname) {
+      return fetchCafe24Html(currentUrl.href, origin, redirectedUrl.hostname, redirectDepth + 1);
+    }
+
+    return fetchCafe24Html(redirectedUrl.href, origin, hostOverride || redirectedUrl.hostname, redirectDepth + 1);
+  }
+
+  return response.data;
 }
 
 function absoluteUrl(value: string, baseUrl: string): string {
@@ -84,6 +133,24 @@ function extractCategoryNo(value: string, baseUrl: string): string {
     return seoMatch?.[1] ?? '';
   } catch {
     return '';
+  }
+}
+
+function isCafe24DetailUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    const pathname = url.pathname.replace(/\/+$/, '');
+    return (
+      pathname.includes('/product/detail.html') ||
+      /^\/product\/(?:[^/]+\/)?\d+(?:\/(?:category|display)\/\d+)*$/i.test(pathname) ||
+      url.searchParams.has('product_no')
+    );
+  } catch {
+    return (
+      value.includes('/product/detail.html') ||
+      /(?:\?|&)product_no=/.test(value) ||
+      /\/product\/(?:[^/]+\/)?\d+(?:\/(?:category|display)\/\d+)*\/?$/i.test(value)
+    );
   }
 }
 
@@ -246,6 +313,82 @@ function parseProductPage(html: string, pageUrl: string): ParsedPage {
   };
 }
 
+function firstMetaContent(
+  $: cheerio.CheerioAPI,
+  selectors: readonly string[],
+): string {
+  for (const selector of selectors) {
+    const element = $(selector).first();
+    const value = element.attr('content')?.trim() ?? element.text().trim();
+    if (value) return value;
+  }
+  return '';
+}
+
+function cleanTitle(value: string): string {
+  return value.replace(/\s+/g, ' ').trim().replace(/^상품명\s*:\s*/, '');
+}
+
+function parseDetailPage(html: string, pageUrl: string): ParsedPage {
+  const $ = cheerio.load(html);
+  const productNo = extractProductNo(pageUrl, pageUrl);
+  if (!productNo) {
+    return { products: [], fingerprint: '' };
+  }
+
+  const name = cleanTitle(
+    firstMetaContent($, [
+      'meta[property="og:title"]',
+      'meta[name="title"]',
+      'meta[property="twitter:title"]',
+    ]) ||
+      $('h1').first().text() ||
+      $('h2').first().text() ||
+      $('[class*=name]').first().text() ||
+      $('[class*=title]').first().text(),
+  );
+
+  const imageUrl =
+    absoluteUrl(
+      firstMetaContent($, [
+        'meta[property="og:image"]',
+        'meta[property="product:image"]',
+        'meta[property="twitter:image"]',
+      ]),
+      pageUrl,
+    ) || findImageUrl($('body'), pageUrl);
+
+  const { consumerPrice, salesPrice } = parsePrices($('body'));
+  const metaPrice = parsePrice(
+    firstMetaContent($, [
+      'meta[property="product:price:amount"]',
+      'meta[property="og:price:amount"]',
+      'meta[name="product_price"]',
+    ]),
+  );
+  const finalSalesPrice = salesPrice || metaPrice;
+  const finalConsumerPrice = consumerPrice || finalSalesPrice;
+
+  if (!name || !finalSalesPrice) {
+    return { products: [], fingerprint: '' };
+  }
+
+  const product: ListedProduct = {
+    productNo,
+    name,
+    image_url: imageUrl,
+    consumer_price: Math.max(finalConsumerPrice, finalSalesPrice),
+    sales_price: finalSalesPrice,
+    url: absoluteUrl(`/product/detail.html?product_no=${productNo}`, pageUrl),
+    options: parseOptions(html),
+  };
+
+  return {
+    products: [product],
+    fingerprint: `${productNo}\0${name}\0${imageUrl}\0${finalSalesPrice}`,
+  };
+}
+
 function discoverCategoryUrls(html: string, baseUrl: string): string[] {
   const $ = cheerio.load(html);
   const categories = new Map<string, string>();
@@ -280,16 +423,14 @@ async function crawlCategory(categoryUrl: string): Promise<ListedProduct[]> {
   const products: ListedProduct[] = [];
   let firstFingerprint = '';
   let previousFingerprint = '';
+  let consecutiveFailures = 0;
 
   for (let page = 1; page <= MAX_PAGES; page += 1) {
     try {
       const currentUrl = pageUrl(categoryUrl, page);
-      const response = await axios.get<string>(currentUrl, {
-        headers: requestHeaders(origin),
-        timeout: 15000,
-      });
-      assertNoCafe24Challenge(response.data);
-      const parsed = parseProductPage(response.data, currentUrl);
+      const html = await fetchCafe24Html(currentUrl, origin);
+      assertNoCafe24Challenge(html);
+      const parsed = parseProductPage(html, currentUrl);
       if (parsed.products.length === 0) break;
       if (
         parsed.fingerprint === previousFingerprint ||
@@ -301,6 +442,7 @@ async function crawlCategory(categoryUrl: string): Promise<ListedProduct[]> {
       products.push(...parsed.products);
       firstFingerprint ||= parsed.fingerprint;
       previousFingerprint = parsed.fingerprint;
+      consecutiveFailures = 0;
     } catch (error) {
       if (
         error instanceof Error &&
@@ -308,8 +450,18 @@ async function crawlCategory(categoryUrl: string): Promise<ListedProduct[]> {
       ) {
         throw error;
       }
+      if (
+        axios.isAxiosError(error) &&
+        (error.response?.status === 404 || error.response?.status === 410)
+      ) {
+        break;
+      }
       console.warn(`[cafe24] Category page ${page} failed for ${categoryUrl}:`, error);
-      break;
+      consecutiveFailures += 1;
+      if (consecutiveFailures >= 3) {
+        break;
+      }
+      continue;
     }
   }
 
@@ -392,11 +544,8 @@ async function enrichWithOptions(
           const detailUrl =
             product.url ||
             absoluteUrl(`/product/detail.html?product_no=${productNo}`, origin);
-          const response = await axios.get<string>(detailUrl, {
-            headers: requestHeaders(origin),
-            timeout: 15000,
-          });
-          return { ...product, options: parseOptions(response.data) };
+          const html = await fetchCafe24Html(detailUrl, origin);
+          return { ...product, options: parseOptions(html) };
         } catch (error) {
           console.warn(`[cafe24] Detail request failed for ${productNo}:`, error);
           return { ...product, options: [] };
@@ -462,39 +611,40 @@ export const cafe24Adapter = {
     onProgress?: (productName: string) => void,
   ): Promise<RawProduct[]> {
     const origin = new URL(url).origin;
-    const response = await axios.get<string>(url, {
-      headers: requestHeaders(origin),
-      timeout: 15000,
-    });
-    const initialHtml = response.data;
+    const initialHtml = await fetchCafe24Html(url, origin);
     assertNoCafe24Challenge(initialHtml);
-    const categoryUrls = discoverCategoryUrls(initialHtml, url);
-    const listedProducts: ListedProduct[] = [];
+    const initialPage = isCafe24DetailUrl(url)
+      ? parseDetailPage(initialHtml, url)
+      : parseProductPage(initialHtml, url);
 
-    const initialProducts = parseProductPage(initialHtml, url).products;
-    listedProducts.push(...initialProducts);
+    if (isCafe24DetailUrl(url)) {
+      const enrichedProducts = filterSoldOutProducts(await enrichWithOptions(
+        dedupeProducts(initialPage.products),
+        origin,
+      ));
+      for (const product of enrichedProducts) onProgress?.(product.name);
+      return enrichedProducts;
+    }
+
+    const categoryUrls = discoverCategoryUrls(initialHtml, url);
+    const listedProducts: ListedProduct[] = [...initialPage.products];
 
     if (categoryUrls.length > 0) {
       for (const categoryUrl of categoryUrls) {
         listedProducts.push(...(await crawlCategory(categoryUrl)));
       }
-    } else if (initialProducts.length > 0) {
-      listedProducts.push(...(await crawlCategory(url)));
     } else {
-      const homepageResponse = await axios.get<string>(origin, {
-        headers: requestHeaders(origin),
-        timeout: 15000,
-      });
-      assertNoCafe24Challenge(homepageResponse.data);
-      for (const categoryUrl of discoverCategoryUrls(homepageResponse.data, origin)) {
+      const homepageHtml = await fetchCafe24Html(origin, origin);
+      assertNoCafe24Challenge(homepageHtml);
+      for (const categoryUrl of discoverCategoryUrls(homepageHtml, origin)) {
         listedProducts.push(...(await crawlCategory(categoryUrl)));
       }
     }
 
-    const enrichedProducts = await enrichWithOptions(
+    const enrichedProducts = filterSoldOutProducts(await enrichWithOptions(
       dedupeProducts(listedProducts),
       origin,
-    );
+    ));
     for (const product of enrichedProducts) onProgress?.(product.name);
     return enrichedProducts;
   },

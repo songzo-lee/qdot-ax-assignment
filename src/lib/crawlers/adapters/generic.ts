@@ -1,8 +1,9 @@
-import axios from 'axios';
+﻿import axios from 'axios';
 import * as cheerio from 'cheerio';
 import type { AnyNode } from 'domhandler';
 import { chromium } from 'playwright';
 import type { RawProduct } from '../../schemas/product';
+import { filterSoldOutProducts } from '../sold-out';
 import type { CrawlerAdapter } from './types';
 
 const MIN_PRODUCTS = 3;
@@ -30,6 +31,15 @@ interface PaginationPattern {
   buildUrl: (page: number) => string;
 }
 
+type GenericPageType = 'product_list' | 'product_detail' | 'placeholder' | 'unknown';
+
+interface PageAnalysis {
+  pageType: GenericPageType;
+  confidence: number;
+  shouldCrawl: boolean;
+  reason?: string[];
+}
+
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -37,6 +47,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function parsePrice(value: string): number {
   return parseInt(value.replace(/[^0-9]/g, ''), 10) || 0;
+}
+
+function isHostingPlaceholder(html: string): boolean {
+  return [
+    'NHN hosting',
+    'hosting.godo.co.kr/common/img.mail/setting_top.gif',
+    'hosting.godo.co.kr/common/img.mail/setting_bg.gif',
+    'service is being applied',
+    'hosting placeholder',
+  ].some((marker) => html.includes(marker));
+}
+
+function assertNotHostingPlaceholder(html: string): void {
+  if (isHostingPlaceholder(html)) {
+    throw new Error(
+      'This page looks like a hosting placeholder, not a real storefront.',
+    );
+  }
 }
 
 function absoluteUrl(value: string, pageUrl: string): string {
@@ -68,15 +96,52 @@ function normalizeProducts(
   products: RawProduct[],
   pageUrl: string,
 ): RawProduct[] {
-  return products
-    .map((product) => normalizeProduct(product, pageUrl))
-    .filter((product) => product.name.length > 0 && product.sales_price > 0);
+  return filterSoldOutProducts(
+    products
+      .map((product) => normalizeProduct(product, pageUrl))
+      .filter((product) => product.name.length > 0 && product.sales_price > 0),
+  );
 }
 
 function stringValue(value: unknown): string {
   return typeof value === 'string' || typeof value === 'number'
     ? String(value)
     : '';
+}
+
+function isNuxtLikeSite(url: string, html: string): boolean {
+  return (
+    url.includes('/_nuxt/') ||
+    html.includes('/_nuxt/') ||
+    html.includes('__NUXT__') ||
+    html.includes('__NUXT_DATA__') ||
+    html.includes('id="__nuxt"') ||
+    html.includes("id='__nuxt'") ||
+    html.includes('data-n-head')
+  );
+}
+
+function shouldProbeShopify(url: string, html: string): boolean {
+  if (isNuxtLikeSite(url, html)) return false;
+  return (
+    url.includes('myshopify.com') ||
+    html.includes('myshopify.com') ||
+    html.includes('cdn.shopify.com') ||
+    html.includes('Shopify') ||
+    html.includes('shopify')
+  );
+}
+
+function shouldProbeWooCommerce(url: string, html: string): boolean {
+  if (isNuxtLikeSite(url, html)) return false;
+  return (
+    url.includes('/wp-json/') ||
+    html.includes('wp-json') ||
+    html.includes('wp-content') ||
+    html.includes('woocommerce') ||
+    html.includes('WooCommerce') ||
+    html.includes('wc/store')
+  );
 }
 
 function parseShopifyProducts(data: unknown, pageUrl: string): RawProduct[] {
@@ -245,6 +310,62 @@ function parseSelectorResponse(value: string): ProductSelectors {
   }
 }
 
+function parsePageAnalysisResponse(value: string): PageAnalysis {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!isRecord(parsed)) {
+      return { pageType: 'unknown', confidence: 0, shouldCrawl: true };
+    }
+
+    const rawPageType = String(parsed.pageType ?? '').trim();
+    const pageType: GenericPageType =
+      rawPageType === 'product_list' ||
+      rawPageType === 'product_detail' ||
+      rawPageType === 'placeholder' ||
+      rawPageType === 'unknown'
+        ? rawPageType
+        : 'unknown';
+
+    const confidenceValue = Number(parsed.confidence);
+    const confidence = Number.isFinite(confidenceValue)
+      ? Math.max(0, Math.min(1, confidenceValue))
+      : 0;
+
+    const reason = Array.isArray(parsed.reason)
+      ? parsed.reason.filter((item): item is string => typeof item === 'string')
+      : typeof parsed.reason === 'string'
+        ? [parsed.reason]
+        : undefined;
+
+    return {
+      pageType,
+      confidence,
+      shouldCrawl:
+        typeof parsed.shouldCrawl === 'boolean'
+          ? parsed.shouldCrawl
+          : pageType !== 'placeholder',
+      reason,
+    };
+  } catch {
+    return { pageType: 'unknown', confidence: 0, shouldCrawl: true };
+  }
+}
+
+function firstMetaContent(
+  $: cheerio.CheerioAPI,
+  selectors: readonly string[],
+): string {
+  for (const selector of selectors) {
+    const value = $(selector).first().attr('content')?.trim();
+    if (value) return value;
+  }
+  return '';
+}
+
+function cleanText(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
 interface Candidate {
   key: string;
   elements: cheerio.Cheerio<AnyNode>[];
@@ -362,6 +483,192 @@ async function detectSelectors(html: string): Promise<ProductSelectors> {
     console.warn('[generic] LLM selector detection failed:', error);
     return {};
   }
+}
+
+async function classifyPage(html: string): Promise<PageAnalysis> {
+  try {
+    const { default: OpenAI } = await import('openai');
+    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const skeleton = buildSmartSkeleton(html);
+    if (!skeleton) {
+      return { pageType: 'unknown', confidence: 0, shouldCrawl: true };
+    }
+
+    const response = await client.chat.completions.create({
+      model: 'gpt-5.4-nano',
+      max_completion_tokens: 300,
+      messages: [
+        {
+          role: 'user',
+          content:
+            'Classify this page as product_list, product_detail, placeholder, or unknown. Return only JSON with keys pageType, confidence, shouldCrawl, reason. Set shouldCrawl false only for placeholder.\n\nHTML skeleton:\n' +
+            skeleton,
+        },
+      ],
+    });
+
+    return parsePageAnalysisResponse(response.choices[0].message.content ?? '');
+  } catch (error) {
+    console.warn('[generic] LLM page classification failed:', error);
+    return { pageType: 'unknown', confidence: 0, shouldCrawl: true };
+  }
+}
+
+function parseDetailProduct(html: string, pageUrl: string): RawProduct[] {
+  const $ = cheerio.load(html);
+  const name = cleanText(
+    firstMetaContent($, [
+      'meta[property="og:title"]',
+      'meta[name="title"]',
+      'meta[property="twitter:title"]',
+    ]) ||
+      $('h1').first().text() ||
+      $('h2').first().text() ||
+      $('[class*=name]').first().text() ||
+      $('[class*=title]').first().text(),
+  );
+
+  const imageUrl =
+    absoluteUrl(
+      firstMetaContent($, [
+        'meta[property="og:image"]',
+        'meta[property="product:image"]',
+        'meta[property="twitter:image"]',
+      ]),
+      pageUrl,
+    ) || $('img').first().attr('src')?.trim() || '';
+
+  const salesPrice =
+    parsePrice(
+      firstMetaContent($, [
+        'meta[property="product:price:amount"]',
+        'meta[property="og:price:amount"]',
+        'meta[name="product_price"]',
+        'meta[itemprop="price"]',
+      ]),
+    ) ||
+    parsePrice(
+      cleanText(
+        $('[class*=price]').first().text() ||
+          $('.price').first().text() ||
+          $('strong').first().text(),
+      ),
+    );
+
+  if (!name || !salesPrice) return [];
+
+  const consumerPrice =
+    parsePrice(
+      firstMetaContent($, [
+        'meta[property="product:original_price:amount"]',
+        'meta[name="original_price"]',
+      ]),
+    ) || salesPrice;
+
+  return normalizeProducts(
+    [
+      {
+        name,
+        image_url: imageUrl,
+        consumer_price: Math.max(consumerPrice, salesPrice),
+        sales_price: salesPrice,
+        description: cleanText(
+          firstMetaContent($, ['meta[name="description"]']) ||
+            $('[class*=desc]').first().text(),
+        ),
+        url: pageUrl,
+      },
+    ],
+    pageUrl,
+  );
+}
+
+async function crawlAnalyzedHtml(
+  html: string,
+  pageUrl: string,
+  onProgress?: (productName: string) => void,
+  label = 'HTML',
+): Promise<RawProduct[] | null> {
+  const analysis = await classifyPage(html);
+  console.log(
+    `[generic] ${label} pageType=${analysis.pageType} confidence=${analysis.confidence}`,
+    analysis.reason?.join(', ') ?? '',
+  );
+
+  if (!analysis.shouldCrawl || analysis.pageType === 'placeholder') {
+    throw new Error('cannot crawl placeholder page');
+  }
+
+  if (analysis.pageType === 'product_detail') {
+    const products = parseDetailProduct(html, pageUrl);
+    if (products.length > 0) {
+      reportProgress(products, onProgress);
+      return enrichWithOptions(products, pageUrl);
+    }
+    return null;
+  }
+
+  const selectors = await detectSelectors(html);
+  const products = parseHtmlProducts(html, pageUrl, selectors);
+  if (products.length >= MIN_PRODUCTS) {
+    const all = await crawlAllPages(pageUrl, selectors, html, onProgress);
+    return enrichWithOptions(all, pageUrl);
+  }
+
+  return null;
+}
+
+async function crawlWithClassification(
+  url: string,
+  initialHtml: string,
+  onProgress?: (productName: string) => void,
+): Promise<RawProduct[]> {
+  try {
+    const analyzedProducts = await crawlAnalyzedHtml(
+      initialHtml,
+      url,
+      onProgress,
+      'Stage 2',
+    );
+    if (analyzedProducts) {
+      return analyzedProducts;
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('cannot crawl placeholder page')) {
+      throw error;
+    }
+    console.warn('[generic] LLM-assisted crawl failed:', error);
+  }
+
+  console.log('[generic] stage 3 -- Playwright render');
+  try {
+    const browser = await chromium.launch();
+    try {
+      const page = await browser.newPage();
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      const renderedHtml = await page.content();
+      console.log(`[generic] rendered HTML: ${renderedHtml.length} chars`);
+      assertNotHostingPlaceholder(renderedHtml);
+      const analyzedProducts = await crawlAnalyzedHtml(
+        renderedHtml,
+        url,
+        onProgress,
+        'Stage 3',
+      );
+      if (analyzedProducts) {
+        return analyzedProducts;
+      }
+    } finally {
+      await browser.close();
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('cannot crawl placeholder page')) {
+      throw error;
+    }
+    console.warn('[generic] Playwright crawl failed:', error);
+  }
+
+  return [];
 }
 
 function reportProgress(
@@ -588,32 +895,54 @@ export const genericAdapter = {
       html = pageResponse.data;
       console.log(`[generic] page fetched (${html.length} chars)`);
 
-      try {
-        const shopifyResponse = await axios.get<unknown>(
-          new URL('/products.json?limit=250', origin).href,
-        );
-        const products = parseShopifyProducts(shopifyResponse.data, url);
-        console.log(`[generic] Shopify: ${products.length} products`);
-        if (products.length >= MIN_PRODUCTS) {
-          reportProgress(products, onProgress);
-          return enrichWithOptions(products, url);
+      if (shouldProbeShopify(url, html)) {
+        try {
+          const shopifyResponse = await axios.get<unknown>(
+            new URL('/products.json?limit=250', origin).href,
+            {
+              validateStatus: (status) => status >= 200 && status < 500,
+            },
+          );
+          if (shopifyResponse.status !== 200) {
+            console.log(
+              `[generic] Shopify API unavailable (${shopifyResponse.status})`,
+            );
+            // Not all storefronts expose Shopify APIs.
+          }
+          const products = parseShopifyProducts(shopifyResponse.data, url);
+          console.log(`[generic] Shopify: ${products.length} products`);
+          if (products.length >= MIN_PRODUCTS) {
+            reportProgress(products, onProgress);
+            return enrichWithOptions(products, url);
+          }
+        } catch (error) {
+          console.warn('[generic] Shopify API crawl failed:', error);
         }
-      } catch (error) {
-        console.warn('[generic] Shopify API crawl failed:', error);
       }
 
-      try {
-        const wooCommerceResponse = await axios.get<unknown>(
-          new URL('/wp-json/wc/v2/products?per_page=100', origin).href,
-        );
-        const products = parseWooCommerceProducts(wooCommerceResponse.data, url);
-        console.log(`[generic] WooCommerce: ${products.length} products`);
-        if (products.length >= MIN_PRODUCTS) {
-          reportProgress(products, onProgress);
-          return enrichWithOptions(products, url);
+      if (shouldProbeWooCommerce(url, html)) {
+        try {
+          const wooCommerceResponse = await axios.get<unknown>(
+            new URL('/wp-json/wc/v2/products?per_page=100', origin).href,
+            {
+              validateStatus: (status) => status >= 200 && status < 500,
+            },
+          );
+          if (wooCommerceResponse.status !== 200) {
+            console.log(
+              `[generic] WooCommerce API unavailable (${wooCommerceResponse.status})`,
+            );
+            // Not all storefronts expose WooCommerce APIs.
+          }
+          const products = parseWooCommerceProducts(wooCommerceResponse.data, url);
+          console.log(`[generic] WooCommerce: ${products.length} products`);
+          if (products.length >= MIN_PRODUCTS) {
+            reportProgress(products, onProgress);
+            return enrichWithOptions(products, url);
+          }
+        } catch (error) {
+          console.warn('[generic] WooCommerce API crawl failed:', error);
         }
-      } catch (error) {
-        console.warn('[generic] WooCommerce API crawl failed:', error);
       }
 
       for (const containerSelector of COMMON_PRODUCT_SELECTORS) {
@@ -632,49 +961,7 @@ export const genericAdapter = {
     } catch (error) {
       console.warn('[generic] Common-pattern crawl failed:', error);
     }
-
-    // Stage 2: use LLM to identify selectors in the fetched HTML.
-    console.log('[generic] stage 2 — LLM selector detection');
-    try {
-      if (html) {
-        const selectors = await detectSelectors(html);
-        const products = parseHtmlProducts(html, url, selectors);
-        console.log(`[generic] LLM HTML: ${products.length} products`);
-        if (products.length >= MIN_PRODUCTS) {
-          const all = await crawlAllPages(url, selectors, html, onProgress);
-          return enrichWithOptions(all, url);
-        }
-      }
-    } catch (error) {
-      console.warn('[generic] LLM-assisted crawl failed:', error);
-    }
-
-    // Stage 3: render the page, then repeat LLM-assisted selector detection.
-    console.log('[generic] stage 3 — Playwright render');
-    try {
-      const browser = await chromium.launch();
-      try {
-        const page = await browser.newPage();
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        const renderedHtml = await page.content();
-        console.log(`[generic] rendered HTML: ${renderedHtml.length} chars`);
-        const selectors = await detectSelectors(renderedHtml);
-        const products = parseHtmlProducts(renderedHtml, url, selectors);
-        console.log(`[generic] Playwright LLM: ${products.length} products`);
-        const all = await crawlAllPages(
-          url,
-          selectors,
-          renderedHtml,
-          onProgress,
-        );
-        return enrichWithOptions(all, url);
-      } finally {
-        await browser.close();
-      }
-    } catch (error) {
-      console.warn('[generic] Playwright crawl failed:', error);
-      return [];
-    }
+    return html ? crawlWithClassification(url, html, onProgress) : [];
   },
 } satisfies CrawlerAdapter;
 

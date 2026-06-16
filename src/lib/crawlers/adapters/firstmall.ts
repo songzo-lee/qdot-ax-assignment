@@ -1,10 +1,13 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
+import type { AnyNode } from 'domhandler';
 import type { RawProduct } from '../../schemas/product';
+import { filterSoldOutProducts } from '../sold-out';
 import type { CrawlerAdapter } from './types';
 
 const USER_AGENT =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1';
+const DETAIL_CONCURRENCY = 10;
 
 interface FirstmallGoodsInfo {
   goods_seq?: string | number;
@@ -15,6 +18,10 @@ interface FirstmallGoodsInfo {
   image?: string;
   category?: string;
 }
+
+type ListedProduct = RawProduct & {
+  goodsNo: string;
+};
 
 function requestHeaders(origin: string): Record<string, string> {
   return {
@@ -34,6 +41,10 @@ function resolveImageUrl(imagePath: string, origin: string): string {
   if (imagePath.startsWith('http')) return imagePath;
   if (imagePath.startsWith('//')) return `https:${imagePath}`;
   return new URL(imagePath, `${origin}/`).href;
+}
+
+function cleanText(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
 }
 
 function parseGoodsInfo(raw: string): FirstmallGoodsInfo | null {
@@ -57,15 +68,11 @@ async function discoverCategoryCodes(
     try {
       const link = new URL(href, `${origin}/`);
       const code = link.searchParams.get('code');
-      if (
-        link.pathname === '/goods/catalog' &&
-        code &&
-        code.trim().length > 0
-      ) {
+      if (link.pathname === '/goods/catalog' && code?.trim()) {
         codes.add(code.trim());
       }
     } catch {
-      // 잘못된 href 무시
+      // ignore malformed links
     }
   });
 
@@ -73,15 +80,87 @@ async function discoverCategoryCodes(
   return [...codes];
 }
 
+function isPlaceholderOption(value: string): boolean {
+  return /^(?:-+|\*+|(?:\uC120\uD0DD|\uC635\uC158\uC120\uD0DD|\uC0C1\uD488\uC635\uC158\uC744\s*\uC120\uD0DD\uD574\s*\uC8FC\uC138\uC694)|choose|select|required)$/i.test(
+    value,
+  );
+}
+
+function optionLabel(
+  $: cheerio.CheerioAPI,
+  element: cheerio.Cheerio<AnyNode>,
+): string {
+  const explicitLabel =
+    element.attr('option_title') ||
+    element.attr('data-option_title') ||
+    element.attr('data-option-name');
+  if (explicitLabel?.trim()) return cleanText(explicitLabel);
+
+  const id = element.attr('id') ?? '';
+  const associatedLabel = id ? $(`label[for="${id}"]`).first().text().trim() : '';
+  if (associatedLabel) return cleanText(associatedLabel);
+
+  const rowLabel = element
+    .closest('tr')
+    .find('th.optionTitle, th, dt, label, .title')
+    .first()
+    .text()
+    .trim();
+  if (rowLabel) return cleanText(rowLabel);
+
+  return '';
+}
+
+function parseOptions(html: string): string[] {
+  const $ = cheerio.load(html);
+  const options: string[] = [];
+
+  $('select').each((_, element) => {
+    const select = $(element);
+    const name = select.attr('name') ?? '';
+    const id = select.attr('id') ?? '';
+    const looksLikeOptionSelect =
+      /^viewOptions/i.test(name) ||
+      /option|goods_option|viewOptions/i.test(name) ||
+      /option|goods_option/i.test(id) ||
+      select.closest('tr').hasClass('optionTr') ||
+      select.attr('option_title') !== undefined ||
+      select.attr('data-option_title') !== undefined ||
+      select.attr('data-option-name') !== undefined;
+
+    if (!looksLikeOptionSelect) return;
+
+    const values = select
+      .find('option')
+      .map((_, option) => {
+        const opt = $(option);
+        const text = cleanText(opt.text());
+        const value = cleanText(opt.attr('value') ?? '');
+        return text || value;
+      })
+      .get()
+      .filter((value) => value.length > 0 && !isPlaceholderOption(value));
+
+    if (values.length === 0) return;
+
+    const label = optionLabel($, select) || `옵션${options.length + 1}`;
+    options.push(`${label}: ${[...new Set(values)].join(', ')}`);
+  });
+
+  return options;
+}
+
 function parseProductsFromPage(
   html: string,
   origin: string,
-): { products: RawProduct[]; fingerprint: string } {
+): { products: ListedProduct[]; fingerprint: string } {
   const $ = cheerio.load(html);
-  const products: RawProduct[] = [];
+  const products: ListedProduct[] = [];
 
   const goodsInfoElements = $('[goodsInfo]');
-  console.log(`[firstmall] parseProductsFromPage: found ${goodsInfoElements.length} [goodsInfo] elements`);
+  console.log(
+    `[firstmall] parseProductsFromPage: found ${goodsInfoElements.length} [goodsInfo] elements`,
+  );
 
   goodsInfoElements.each((_, element) => {
     const raw = $(element).attr('goodsInfo') ?? $(element).attr('goodsinfo');
@@ -90,21 +169,19 @@ function parseProductsFromPage(
     const info = parseGoodsInfo(raw);
     if (!info || !info.goods_name || !info.goods_seq) return;
 
-    const salesPrice =
-      parsePrice(info.sale_price) ||
-      parsePrice(info.price);
-    const consumerPrice =
-      parsePrice(info.consumer_price) || salesPrice;
+    const salesPrice = parsePrice(info.sale_price) || parsePrice(info.price);
+    const consumerPrice = parsePrice(info.consumer_price) || salesPrice;
 
     if (!salesPrice) return;
 
     products.push({
+      goodsNo: String(info.goods_seq),
       name: String(info.goods_name).trim(),
       image_url: resolveImageUrl(String(info.image ?? ''), origin),
       consumer_price: Math.max(consumerPrice, salesPrice),
       sales_price: salesPrice,
       category: info.category ? String(info.category).trim() : undefined,
-      url: `${origin}/goods/goods_view.php?goodsNo=${encodeURIComponent(String(info.goods_seq))}`,
+      url: `${origin}/goods/view?no=${encodeURIComponent(String(info.goods_seq))}`,
     });
   });
 
@@ -112,11 +189,50 @@ function parseProductsFromPage(
   return { products, fingerprint };
 }
 
+async function fetchProductOptions(
+  origin: string,
+  goodsNo: string,
+): Promise<string[]> {
+  if (!goodsNo) return [];
+
+  try {
+    const detailUrl = `${origin}/goods/view?no=${encodeURIComponent(goodsNo)}`;
+    const response = await axios.get<string>(detailUrl, {
+      headers: requestHeaders(origin),
+      timeout: 15000,
+    });
+    return parseOptions(response.data);
+  } catch (error) {
+    console.warn(`[firstmall] Detail request failed for goodsNo ${goodsNo}:`, error);
+    return [];
+  }
+}
+
+async function enrichWithOptions(
+  origin: string,
+  products: ListedProduct[],
+): Promise<RawProduct[]> {
+  const { default: pLimit } = await import('p-limit');
+  const limit = pLimit(DETAIL_CONCURRENCY);
+
+  return Promise.all(
+    products.map((listedProduct) =>
+      limit(async () => {
+        const { goodsNo, ...product } = listedProduct;
+        return {
+          ...product,
+          options: await fetchProductOptions(origin, goodsNo),
+        } as RawProduct;
+      }),
+    ),
+  );
+}
+
 async function crawlCategory(
   origin: string,
   code: string,
-): Promise<RawProduct[]> {
-  const all: RawProduct[] = [];
+): Promise<ListedProduct[]> {
+  const all: ListedProduct[] = [];
   let previousFingerprint = '';
 
   for (let page = 1; ; page += 1) {
@@ -176,30 +292,33 @@ export const firstmallAdapter = {
     console.log(`[firstmall] homepage fetched (${homepageHtml.length} chars)`);
 
     const codes = await discoverCategoryCodes(origin, homepageHtml);
-    const allProducts: RawProduct[] = [];
 
     if (codes.length === 0) {
       console.warn('[firstmall] No category codes found, trying homepage directly');
       const { products } = parseProductsFromPage(homepageHtml, origin);
       console.log(`[firstmall] homepage products: ${products.length}`);
-      for (const p of products) onProgress?.(p.name);
-      return products;
+      const enriched = filterSoldOutProducts(await enrichWithOptions(origin, products));
+      for (const product of enriched) onProgress?.(product.name);
+      return enriched;
     }
 
     const seenSeqs = new Set<string>();
+    const allProducts: ListedProduct[] = [];
 
     for (const code of codes) {
       const products = await crawlCategory(origin, code);
       for (const product of products) {
-        const key = product.url ?? product.name;
+        const key = product.goodsNo || product.url || product.name;
         if (seenSeqs.has(key)) continue;
         seenSeqs.add(key);
         allProducts.push(product);
-        onProgress?.(product.name);
       }
     }
 
-    console.log(`[firstmall] crawl done: ${allProducts.length} total products`);
-    return allProducts;
+    const enriched = filterSoldOutProducts(await enrichWithOptions(origin, allProducts));
+    for (const product of enriched) onProgress?.(product.name);
+
+    console.log(`[firstmall] crawl done: ${enriched.length} total products`);
+    return enriched;
   },
 } satisfies CrawlerAdapter;
