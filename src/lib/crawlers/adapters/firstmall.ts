@@ -2,7 +2,11 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import type { AnyNode } from 'domhandler';
 import type { RawProduct } from '../../schemas/product';
-import { filterSoldOutProducts } from '../sold-out';
+import {
+  filterSoldOutProducts,
+  isOptionValueSoldOut,
+  stripSoldOutSuffix,
+} from '../sold-out';
 import type { CrawlerAdapter } from './types';
 
 const USER_AGENT =
@@ -136,7 +140,10 @@ function parseOptions(html: string): string[] {
         const opt = $(option);
         const text = cleanText(opt.text());
         const value = cleanText(opt.attr('value') ?? '');
-        return text || value;
+        const candidate = text || value;
+        if (!candidate) return '';
+        if (isOptionValueSoldOut(candidate, option, $)) return '';
+        return stripSoldOutSuffix(candidate);
       })
       .get()
       .filter((value) => value.length > 0 && !isPlaceholderOption(value));

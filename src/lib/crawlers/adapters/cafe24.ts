@@ -2,7 +2,11 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import type { AnyNode } from 'domhandler';
 import type { RawProduct } from '../../schemas/product';
-import { filterSoldOutProducts } from '../sold-out';
+import {
+  filterSoldOutProducts,
+  isOptionValueSoldOut,
+  stripSoldOutSuffix,
+} from '../sold-out';
 import type { CrawlerAdapter } from './types';
 
 const MAX_PAGES = 100;
@@ -510,7 +514,13 @@ function parseOptions(html: string): string[] {
 
     const values = select
       .find('option')
-      .map((_, option) => $(option).text().replace(/\s+/g, ' ').trim())
+      .map((_, option) => {
+        const optionElement = $(option);
+        const text = optionElement.text().replace(/\s+/g, ' ').trim();
+        if (!text) return '';
+        if (isOptionValueSoldOut(text, option, $)) return '';
+        return stripSoldOutSuffix(text);
+      })
       .get()
       .filter(
         (value) =>

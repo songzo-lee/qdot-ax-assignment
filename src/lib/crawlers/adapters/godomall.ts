@@ -2,7 +2,11 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import type { Readable } from 'stream';
 import type { RawProduct } from '../../schemas/product';
-import { filterSoldOutProducts } from '../sold-out';
+import {
+  filterSoldOutProducts,
+  isOptionValueSoldOut,
+  stripSoldOutSuffix,
+} from '../sold-out';
 import type { CrawlerAdapter } from './types';
 
 const PAGE_SIZE = 200;
@@ -171,8 +175,20 @@ function parseOptions(html: string): string[] {
     const heading = $(row).find('th').first().text().replace(/\s+/g, ' ').trim();
     if (!keywords.some((keyword) => heading.includes(keyword))) return;
 
-    const value = $(row).find('td').first().text().replace(/\s+/g, ' ').trim();
-    if (value) results.add(`${heading}: ${value}`);
+    const cell = $(row).find('td').first();
+    const value = cell.text().replace(/\s+/g, ' ').trim();
+    if (!value) return;
+
+    const values = value
+      .split(',')
+      .map((item) => item.replace(/\s+/g, ' ').trim())
+      .filter((item) => item.length > 0 && !isOptionValueSoldOut(item, cell.get(0), $))
+      .map((item) => stripSoldOutSuffix(item))
+      .filter((item) => item.length > 0);
+
+    if (values.length > 0) {
+      results.add(`${heading}: ${[...new Set(values)].join(', ')}`);
+    }
   });
 
   return [...results];

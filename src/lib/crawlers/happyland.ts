@@ -1,7 +1,11 @@
 import axios from "axios";
 import * as cheerio from "cheerio";
 import type { RawProduct } from "../schemas/product";
-import { filterSoldOutProducts } from "./sold-out";
+import {
+  filterSoldOutProducts,
+  isOptionValueSoldOut,
+  stripSoldOutSuffix,
+} from "./sold-out";
 import type { CrawlerAdapter } from "./adapters/types";
 
 const BASE_URL = "https://m.happylandmall.com";
@@ -161,8 +165,18 @@ function parseOptions(html: string): string[] {
   $("table tr").each((_, row) => {
     const th = $(row).find("th").first().text().trim();
     if (!keywords.some((kw) => th.includes(kw))) return;
-    const value = $(row).find("td").first().text().trim();
-    if (value) results.push(`${th}: ${value}`);
+    const cell = $(row).find("td").first();
+    const value = cell.text().replace(/\s+/g, " ").trim();
+    if (!value) return;
+
+    const values = value
+      .split(",")
+      .map((item) => item.replace(/\s+/g, " ").trim())
+      .filter((item) => item.length > 0 && !isOptionValueSoldOut(item, cell.get(0), $))
+      .map((item) => stripSoldOutSuffix(item))
+      .filter((item) => item.length > 0);
+
+    if (values.length > 0) results.push(`${th}: ${[...new Set(values)].join(", ")}`);
   });
 
   return results;

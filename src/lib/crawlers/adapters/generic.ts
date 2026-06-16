@@ -3,7 +3,11 @@ import * as cheerio from 'cheerio';
 import type { AnyNode } from 'domhandler';
 import { chromium } from 'playwright';
 import type { RawProduct } from '../../schemas/product';
-import { filterSoldOutProducts } from '../sold-out';
+import {
+  filterSoldOutProducts,
+  isOptionValueSoldOut,
+  stripSoldOutSuffix,
+} from '../sold-out';
 import type { CrawlerAdapter } from './types';
 
 const MIN_PRODUCTS = 3;
@@ -791,7 +795,12 @@ function extractOptions(html: string): string[] {
 
     const values = select
       .find('option')
-      .map((_, opt) => $(opt).text().trim())
+      .map((_, opt) => {
+        const text = $(opt).text().replace(/\s+/g, ' ').trim();
+        if (!text) return '';
+        if (isOptionValueSoldOut(text, opt, $)) return '';
+        return stripSoldOutSuffix(text);
+      })
       .get()
       .filter((v) => v.length > 0 && !/^[-–—]+$|선택/.test(v));
 
@@ -833,7 +842,12 @@ function extractOptions(html: string): string[] {
       input.closest('label').text().trim() ||
       input.next('label').text().trim();
 
-    if (valueLabel) radioGroups.get(name)!.values.push(valueLabel);
+    if (valueLabel) {
+      const cleanedValue = valueLabel.replace(/\s+/g, ' ').trim();
+      if (!isOptionValueSoldOut(cleanedValue)) {
+        radioGroups.get(name)!.values.push(stripSoldOutSuffix(cleanedValue));
+      }
+    }
   });
 
   for (const { label, values } of radioGroups.values()) {

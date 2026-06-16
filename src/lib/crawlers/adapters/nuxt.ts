@@ -3,7 +3,11 @@ import * as cheerio from 'cheerio';
 import type { AnyNode } from 'domhandler';
 import type { RawProduct } from '../../schemas/product';
 import { fetchHtmlWithFallbackAndUrl, getBrowser, parsePrice } from '../utils';
-import { filterSoldOutProducts } from '../sold-out';
+import {
+  filterSoldOutProducts,
+  isOptionValueSoldOut,
+  stripSoldOutSuffix,
+} from '../sold-out';
 import type { CrawlerAdapter } from './types';
 
 const USER_AGENT =
@@ -390,7 +394,9 @@ function extractOptionsFromValue(
 
   if (typeof value === 'string' || typeof value === 'number') {
     const text = cleanText(String(value));
-    if (text && !OPTION_SKIP_RE.test(text)) collected.add(text);
+    if (text && !OPTION_SKIP_RE.test(text) && !isOptionValueSoldOut(text)) {
+      collected.add(stripSoldOutSuffix(text));
+    }
     return [...collected];
   }
 
@@ -411,7 +417,9 @@ function extractOptionsFromValue(
     if (typeof nested === 'string' || typeof nested === 'number') {
       if (/(?:option|variant|choice|color|colour|size)/i.test(key)) {
         const text = cleanText(String(nested));
-        if (text && !OPTION_SKIP_RE.test(text)) collected.add(text);
+        if (text && !OPTION_SKIP_RE.test(text) && !isOptionValueSoldOut(text)) {
+          collected.add(stripSoldOutSuffix(text));
+        }
       }
       continue;
     }
@@ -634,8 +642,8 @@ function extractOptionsFromHtml(html: string): string[] {
   $('select option, [class*=option] li, [class*=option] button, [role="option"]').each(
     (_, element) => {
       const text = cleanText($(element).text());
-      if (text && !OPTION_SKIP_RE.test(text)) {
-        options.add(text);
+      if (text && !OPTION_SKIP_RE.test(text) && !isOptionValueSoldOut(text, element, $)) {
+        options.add(stripSoldOutSuffix(text));
       }
     },
   );
@@ -659,7 +667,9 @@ function normalizeProduct(product: RawProduct, baseUrl: string): RawProduct {
     description: product.description ? cleanText(product.description) : undefined,
     category: product.category ? cleanText(product.category) : undefined,
     url: product.url ? absoluteUrl(product.url, baseUrl) : undefined,
-    options: product.options?.map((option) => cleanText(option)).filter(Boolean),
+    options: product.options
+      ?.map((option) => stripSoldOutSuffix(cleanText(option)))
+      .filter(Boolean),
   };
 }
 
