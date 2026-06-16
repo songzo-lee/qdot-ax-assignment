@@ -1,19 +1,13 @@
 import axios from "axios";
-import type { Page } from "playwright";
 import type { RawProduct } from "../schemas/product";
 import {
   getBrowser,
-  getPage,
   normalizeImageUrl,
   parsePrice,
   STEALTH_SCRIPT,
 } from "./utils";
 
 const API_BASE_URL = "https://smartstore.naver.com/i/v2/channels";
-const CATEGORY_API_BASE_URLS = [
-  API_BASE_URL,
-  "https://brand.naver.com/n/v2/channels",
-];
 const PRODUCT_BATCH_SIZE = 50;
 const CHANNEL_UID_PATTERN =
   /channelUid["']?\s*:\s*["']([A-Za-z0-9_-]{10,})["']/;
@@ -70,209 +64,6 @@ function mapProducts(products: NaverSmartProduct[]): RawProduct[] {
           ?.map((option) => option.optionName1 ?? option.label ?? "")
           .filter(Boolean) ?? [],
     }));
-}
-
-async function extractChannelUidFromPage(page: Page): Promise<string | null> {
-  return page.evaluate(() => {
-    const state = (
-      window as Window & {
-        __PRELOADED_STATE__?: {
-          channel?: {
-            channelUid?: unknown;
-          };
-        };
-      }
-    ).__PRELOADED_STATE__;
-    const channelUid = state?.channel?.channelUid;
-
-    return typeof channelUid === "string" ? channelUid : null;
-  });
-}
-
-async function fetchProductIdsWithPage(
-  page: Page,
-  channelUid: string
-): Promise<number[]> {
-  return page.evaluate(async ({ apiBaseUrl, channelUid }) => {
-    const fetchIds = async (collection: string): Promise<unknown[]> => {
-      const response = await fetch(
-        `${apiBaseUrl}/${channelUid}/bs-product-collection/${collection}`
-      );
-
-      if (!response.ok) {
-        throw new Error(
-          `Failed to fetch ${collection}: ${response.status} ${response.statusText}`
-        );
-      }
-
-      const data: unknown = await response.json();
-      if (!Array.isArray(data)) {
-        throw new Error(`Unexpected ${collection} response`);
-      }
-
-      return data;
-    };
-
-    const [bestProducts, newProducts] = await Promise.all([
-      fetchIds("best-products"),
-      fetchIds("new-products"),
-    ]);
-
-    return Array.from(
-      new Set(
-        [...bestProducts, ...newProducts].filter(
-          (id): id is number => typeof id === "number" && Number.isFinite(id)
-        )
-      )
-    );
-  }, { apiBaseUrl: API_BASE_URL, channelUid });
-}
-
-async function fetchCategoryIdsWithPage(
-  page: Page,
-  channelUid: string
-): Promise<Array<number | string>> {
-  return page.evaluate(async ({ apiBaseUrls, channelUid }) => {
-    const categoryIds = new Set<number | string>();
-    const failures: string[] = [];
-
-    const visit = (value: unknown): void => {
-      if (Array.isArray(value)) {
-        value.forEach(visit);
-        return;
-      }
-
-      if (!value || typeof value !== "object") {
-        return;
-      }
-
-      const category = value as Record<string, unknown>;
-      if (
-        ((typeof category.id === "number" && Number.isFinite(category.id)) ||
-          (typeof category.id === "string" && category.id.length > 0)) &&
-        category.allProductCategory !== true
-      ) {
-        categoryIds.add(category.id);
-      }
-
-      Object.values(category).forEach(visit);
-    };
-
-    for (const apiBaseUrl of apiBaseUrls) {
-      try {
-        const response = await fetch(
-          `${apiBaseUrl}/${channelUid}/categories/tree/DISPLAY`
-        );
-
-        if (!response.ok) {
-          throw new Error(`${response.status} ${response.statusText}`);
-        }
-
-        visit((await response.json()) as unknown);
-      } catch (error) {
-        failures.push(
-          `${apiBaseUrl}: ${error instanceof Error ? error.message : String(error)}`
-        );
-      }
-    }
-
-    if (failures.length === apiBaseUrls.length) {
-      throw new Error(`Failed to fetch category trees: ${failures.join("; ")}`);
-    }
-
-    return Array.from(categoryIds);
-  }, { apiBaseUrls: CATEGORY_API_BASE_URLS, channelUid });
-}
-
-async function fetchCategoryProductsWithPage(
-  page: Page,
-  channelUid: string,
-  storeId: string
-): Promise<NaverSmartProduct[]> {
-  const categoryIds = await fetchCategoryIdsWithPage(page, channelUid);
-  const productsById = new Map<number, NaverSmartProduct>();
-
-  for (const categoryId of categoryIds) {
-    let categoryPage: Page | null = null;
-
-    try {
-      ({ page: categoryPage } = await getPage(
-        `https://smartstore.naver.com/${storeId}/category/${categoryId}`
-      ));
-      await categoryPage
-        .waitForFunction(
-          () => !!(window as any).__PRELOADED_STATE__?.categoryProducts,
-          { timeout: 10000 }
-        )
-        .catch(() => null);
-      const products = await categoryPage.evaluate(() => {
-        const state = (
-          window as Window & {
-            __PRELOADED_STATE__?: {
-              categoryProducts?: {
-                simpleProducts?: NaverSmartProduct[];
-              };
-            };
-          }
-        ).__PRELOADED_STATE__;
-
-        return state?.categoryProducts?.simpleProducts ?? [];
-      });
-
-      for (const product of products) {
-        productsById.set(product.id, product);
-      }
-    } catch (error) {
-      console.warn(
-        `[naver-smart] Failed to crawl category ${categoryId}:`,
-        error
-      );
-    } finally {
-      await categoryPage?.context().close();
-    }
-  }
-
-  return Array.from(productsById.values());
-}
-
-async function fetchProductsWithPage(
-  page: Page,
-  channelUid: string,
-  productIds: number[]
-): Promise<NaverSmartProduct[]> {
-  return page.evaluate(
-    async ({ apiBaseUrl, batchSize, channelUid, productIds }) => {
-      const products: NaverSmartProduct[] = [];
-
-      for (let index = 0; index < productIds.length; index += batchSize) {
-        const batch = productIds.slice(index, index + batchSize);
-        const response = await fetch(
-          `${apiBaseUrl}/${channelUid}/simple-products?ids[]=${batch.join(",")}`
-        );
-
-        if (!response.ok) {
-          throw new Error(
-            `Failed to fetch product details: ${response.status} ${response.statusText}`
-          );
-        }
-
-        const data: unknown = await response.json();
-        if (!Array.isArray(data)) {
-          throw new Error("Unexpected simple-products response");
-        }
-
-        products.push(...(data as NaverSmartProduct[]));
-      }
-
-      return products;
-    },
-    {
-      apiBaseUrl: API_BASE_URL,
-      batchSize: PRODUCT_BATCH_SIZE,
-      channelUid,
-      productIds,
-    }
-  );
 }
 
 async function crawlWithPlaywright(storeUrl: string): Promise<RawProduct[] | null> {
@@ -471,8 +262,6 @@ export async function crawlNaverSmartStore(
   onProgress?: (productName: string) => void
 ): Promise<RawProduct[]> {
   const STORE_URL = storeUrl;
-  const STORE_ID =
-    new URL(storeUrl).pathname.split("/").filter(Boolean)[0] ?? "unknown";
 
   console.log("[naver-smart] Starting crawl:", STORE_URL);
 

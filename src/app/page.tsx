@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useState } from "react";
 import type { CrawlResult } from "./api/crawl/route";
@@ -25,6 +25,7 @@ interface ProgressState {
 
 type CrawlEvent =
   | { type: "progress"; stage: ProgressState["stage"]; productName: string }
+  | { type: "crawl_done"; total: number; limited_total: number }
   | { type: "lowest_price_start"; total: number }
   | { type: "lowest_price_done" }
   | { type: "analyze_start"; total: number }
@@ -75,6 +76,7 @@ export default function Home() {
   const [result, setResult] = useState<CrawlResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<ProgressState | null>(null);
+  const [crawlCount, setCrawlCount] = useState(0);
   const [analyzeCount, setAnalyzeCount] = useState<{ current: number; total: number } | null>(null);
   const [expandedProduct, setExpandedProduct] = useState<string | null>(null);
   const [mode, setMode] = useState<"store" | "url">("store");
@@ -85,6 +87,7 @@ export default function Home() {
     setError(null);
     setResult(null);
     setProgress({ stage: "crawl", productNames: [] });
+    setCrawlCount(0);
     setAnalyzeCount(null);
 
     const eventSource = new EventSource(
@@ -97,6 +100,11 @@ export default function Home() {
         const data = JSON.parse(event.data) as CrawlEvent;
 
         if (data.type === "lowest_price_start" || data.type === "lowest_price_done") {
+          return;
+        }
+
+        if (data.type === "crawl_done") {
+          setCrawlCount(data.total);
           return;
         }
 
@@ -117,6 +125,9 @@ export default function Home() {
               ...(current?.productNames ?? []),
             ].slice(0, 5),
           }));
+          if (data.stage === "crawl") {
+            setCrawlCount((count) => count + 1);
+          }
           if (data.stage === "analyze") {
             setAnalyzeCount((c) => c ? { ...c, current: c.current + 1 } : null);
           }
@@ -162,6 +173,7 @@ export default function Home() {
     setError(null);
     setResult(null);
     setProgress({ stage: "crawl", productNames: [] });
+    setCrawlCount(0);
     setAnalyzeCount(null);
 
     try {
@@ -177,6 +189,11 @@ export default function Home() {
             data.type === "lowest_price_start" ||
             data.type === "lowest_price_done"
           ) {
+            return false;
+          }
+
+          if (data.type === "crawl_done") {
+            setCrawlCount(data.total);
             return false;
           }
 
@@ -197,6 +214,9 @@ export default function Home() {
                 ...(current?.productNames ?? []),
               ].slice(0, 5),
             }));
+            if (data.stage === "crawl") {
+              setCrawlCount((count) => count + 1);
+            }
             if (data.stage === "analyze") {
               setAnalyzeCount((count) =>
                 count ? { ...count, current: count.current + 1 } : null
@@ -250,8 +270,6 @@ export default function Home() {
     a.click();
     URL.revokeObjectURL(url);
   }
-
-  const allProducts = result?.stores.flatMap((s) => s.products) ?? [];
 
   return (
     <main className={styles.main}>
@@ -337,6 +355,11 @@ export default function Home() {
                     : "AI 분석 중..."
                 )}
               </strong>
+              <div>
+                {progress.stage === "crawl"
+                  ? `${crawlCount}개 수집됨`
+                  : `${crawlCount}개 크롤링 완료`}
+              </div>
               {progress.productNames.map((productName, index) => (
                 <div key={`${productName}-${index}`}>{productName}</div>
               ))}
@@ -468,3 +491,4 @@ function ProductCard({
     </div>
   );
 }
+
