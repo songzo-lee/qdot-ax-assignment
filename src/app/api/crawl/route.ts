@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { analyzeProducts } from "@/lib/ai/analyzer";
 import { enrichWithLowestPrices } from "@/lib/crawlers/lowest-price";
 import { crawlUniversal } from "@/lib/crawlers/universal";
-import { closeBrowser } from "@/lib/crawlers/utils";
+import { closeBrowser, fetchHtmlWithFallback } from "@/lib/crawlers/utils";
 import type { PartnerProductCreateInput } from "@/lib/schemas/product";
 
 export interface CrawlResult {
@@ -40,12 +40,7 @@ const STORES = [
 async function extractBrandName(url: string): Promise<string> {
   const hostname = new URL(url).hostname;
   try {
-    const { default: axios } = await import('axios');
-    const response = await axios.get<string>(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15' },
-      timeout: 10000,
-    });
-    const html: string = response.data;
+    const html = await fetchHtmlWithFallback(url);
     // og:site_name
     const ogSite = html.match(/<meta[^>]+property=["']og:site_name["'][^>]+content=["']([^"']+)["']/i)?.[1]
       ?? html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:site_name["']/i)?.[1];
@@ -100,6 +95,12 @@ export async function GET(req: NextRequest) {
               );
               console.log(`Raw products found: ${rawProducts.length}`);
               const limitedProducts = limit ? rawProducts.slice(0, limit) : rawProducts;
+
+              send({
+                type: "crawl_done",
+                total: rawProducts.length,
+                limited_total: limitedProducts.length,
+              });
 
               send({ type: "lowest_price_start", total: limitedProducts.length });
               send({ type: "analyze_start", total: limitedProducts.length });
@@ -218,6 +219,11 @@ export async function POST(req: NextRequest) {
           const rawProducts = await crawlUniversal(url, (productName) =>
             send({ type: "progress", stage: "crawl", productName })
           );
+          send({
+            type: "crawl_done",
+            total: rawProducts.length,
+            limited_total: rawProducts.length,
+          });
 
           send({ type: "lowest_price_start", total: rawProducts.length });
           send({ type: "analyze_start", total: rawProducts.length });
